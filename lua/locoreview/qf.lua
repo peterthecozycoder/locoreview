@@ -1,10 +1,10 @@
 local M = {}
 
-local fs = require("review.fs")
-local git = require("review.git")
-local store = require("review.store")
-local ui = require("review.ui")
-local util = require("review.util")
+local fs = require("locoreview.fs")
+local git = require("locoreview.git")
+local store = require("locoreview.store")
+local ui = require("locoreview.ui")
+local util = require("locoreview.util")
 
 local last_filter = nil
 
@@ -33,7 +33,7 @@ function M.populate(items, filter)
   end
 
   vim.fn.setqflist({}, " ", {
-    title = "review.nvim",
+    title = "locoreview.nvim",
     items = entries,
   })
   last_filter = matcher

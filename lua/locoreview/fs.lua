@@ -1,6 +1,6 @@
 local M = {}
 
-local config = require("review.config")
+local config = require("locoreview.config")
 
 local function has_vim()
   return type(vim) == "table"

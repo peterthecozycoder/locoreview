@@ -1,6 +1,6 @@
 local M = {}
 
-local util = require("review.util")
+local util = require("locoreview.util")
 
 function M.notify(msg, level)
   local prefix = "[review] "

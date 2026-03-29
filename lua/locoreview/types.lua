@@ -1,6 +1,6 @@
 local M = {}
 
-local util = require("review.util")
+local util = require("locoreview.util")
 
 M.STATUS = {
   open = "open",

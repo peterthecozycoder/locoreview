@@ -1,12 +1,12 @@
-# review.nvim
+# locoreview.nvim
 
-`review.nvim` is a local-first Neovim plugin for capturing, listing, and resolving structured code review comments in a repo-local markdown file.
+`locoreview.nvim` is a local-first Neovim plugin for capturing, listing, and resolving structured code review comments in a repo-local markdown file.
 
 ## Installation (lazy.nvim)
 
 ```lua
 {
-  "yourname/review.nvim",
+  "peterthecozycoder/locoreview.nvim",
   dependencies = {
     "nvim-lua/plenary.nvim",
     { "sindrets/diffview.nvim", optional = true },
@@ -29,7 +29,7 @@
 ## Minimal Setup
 
 ```lua
-require("review").setup({})
+require("locoreview").setup({})
 ```
 
 ## Commands
@@ -82,7 +82,7 @@ require("review").setup({})
 # Review Comments
 
 ## RV-0001
-file: lua/review/store.lua
+file: lua/locoreview/store.lua
 line: 42
 end_line:
 severity: medium

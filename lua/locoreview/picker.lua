@@ -1,9 +1,9 @@
 local M = {}
 
-local config = require("review.config")
-local git = require("review.git")
-local ui = require("review.ui")
-local util = require("review.util")
+local config = require("locoreview.config")
+local git = require("locoreview.git")
+local ui = require("locoreview.ui")
+local util = require("locoreview.util")
 local AUTO_BACKENDS = { "telescope", "fzf_lua", "snacks" }
 
 local function to_entries(items)

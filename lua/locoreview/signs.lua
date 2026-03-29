@@ -1,10 +1,10 @@
 local M = {}
 
-local config = require("review.config")
-local git = require("review.git")
-local util = require("review.util")
+local config = require("locoreview.config")
+local git = require("locoreview.git")
+local util = require("locoreview.util")
 
-local GROUP = "review.nvim"
+local GROUP = "locoreview.nvim"
 local DEFAULT_PRIORITY = 20
 local STATUS_SIGN = {
   open = "ReviewOpenSign",
@@ -27,7 +27,7 @@ function M.setup()
     return
   end
 
-  ns = vim.api.nvim_create_namespace("review.nvim")
+  ns = vim.api.nvim_create_namespace("locoreview.nvim")
   local cfg = config.get()
   enabled = not (cfg.signs and cfg.signs.enabled == false)
 

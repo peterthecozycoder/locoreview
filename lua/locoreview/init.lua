@@ -1,7 +1,7 @@
-local config = require("review.config")
-local commands = require("review.commands")
-local keymaps = require("review.keymaps")
-local signs = require("review.signs")
+local config = require("locoreview.config")
+local commands = require("locoreview.commands")
+local keymaps = require("locoreview.keymaps")
+local signs = require("locoreview.signs")
 
 local M = {}
 

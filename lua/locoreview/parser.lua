@@ -1,7 +1,7 @@
 local M = {}
 
-local fs = require("review.fs")
-local types = require("review.types")
+local fs = require("locoreview.fs")
+local types = require("locoreview.types")
 local ITEM_HEADER_PATTERN = "^##%s+RV%-%d%d%d%d%s*$"
 local ITEM_ID_PATTERN = "^##%s+(RV%-%d%d%d%d)%s*$"
 local SEPARATOR_PATTERN = "^%-%-%-%s*$"

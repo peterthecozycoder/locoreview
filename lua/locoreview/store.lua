@@ -1,10 +1,10 @@
 local M = {}
 
-local formatter = require("review.formatter")
-local fs = require("review.fs")
-local parser = require("review.parser")
-local types = require("review.types")
-local util = require("review.util")
+local formatter = require("locoreview.formatter")
+local fs = require("locoreview.fs")
+local parser = require("locoreview.parser")
+local types = require("locoreview.types")
+local util = require("locoreview.util")
 
 
 function M.load(path)

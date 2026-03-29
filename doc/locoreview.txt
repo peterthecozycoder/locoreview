@@ -1,10 +1,10 @@
-*review.nvim*  Local-first code review comments for Neovim
+*locoreview.nvim*  Local-first code review comments for Neovim
 
-review.nvim lets you add, navigate, and resolve lightweight review comments in a
+locoreview.nvim lets you add, navigate, and resolve lightweight review comments in a
 repo-local markdown file.
 
 ==============================================================================
-OVERVIEW                                                        *review-overview*
+OVERVIEW                                                        *locoreview-overview*
 
 - Structured markdown file format (`review.md` by default)
 - Local-first workflow for review comments
@@ -12,12 +12,12 @@ OVERVIEW                                                        *review-overview
 - Optional integrations (Diffview, signs, agent command)
 
 ==============================================================================
-INSTALLATION                                                  *review-install*
+INSTALLATION                                                  *locoreview-install*
 
 With lazy.nvim:
 >
   {
-    "yourname/review.nvim",
+    "yourname/locoreview.nvim",
     dependencies = {
       "nvim-lua/plenary.nvim",
       { "sindrets/diffview.nvim", optional = true },
@@ -27,11 +27,11 @@ With lazy.nvim:
 <
 
 ==============================================================================
-SETUP                                                             *review-setup*
+SETUP                                                             *locoreview-setup*
 
 Minimal setup:
 >
-  require("review").setup({})
+  require("locoreview").setup({})
 <
 
 Key config fields:
@@ -45,7 +45,7 @@ Key config fields:
 - `agent.enabled`, `agent.cmd`, `agent.open_in_split`
 
 ==============================================================================
-COMMANDS                                                      *review-commands*
+COMMANDS                                                      *locoreview-commands*
 
 Core:
 - `:ReviewOpen`
@@ -72,7 +72,7 @@ v1.5:
 - `:ReviewAddDiff`
 
 ==============================================================================
-KEYMAPS                                                        *review-keymaps*
+KEYMAPS                                                        *locoreview-keymaps*
 
 Default keymaps (when enabled):
 - `<leader>ro` `ReviewOpen`
@@ -95,14 +95,14 @@ Default keymaps (when enabled):
 - `<leader>rs` `ReviewToggleSigns`
 
 ==============================================================================
-REVIEW FILE FORMAT                                            *review-file-format*
+REVIEW FILE FORMAT                                            *locoreview-file-format*
 
 Canonical format:
 >
   # Review Comments
 
   ## RV-0001
-  file: lua/review/store.lua
+  file: lua/locoreview/store.lua
   line: 42
   end_line:
   severity: medium
@@ -128,7 +128,7 @@ Rules:
 - `end_line` and `author` may be blank
 
 ==============================================================================
-INTEGRATIONS                                                *review-integrations*
+INTEGRATIONS                                                *locoreview-integrations*
 
 Diffview:
 - `:ReviewDiff`
@@ -141,7 +141,7 @@ Agent:
 - `:ReviewFix` runs `agent.cmd` with a generated prompt
 
 ==============================================================================
-TROUBLESHOOTING                                            *review-troubleshooting*
+TROUBLESHOOTING                                            *locoreview-troubleshooting*
 
 - If commands are missing, verify plugin loaded and run setup.
 - If add commands fail, verify current buffer is a file in the repo.

@@ -8,8 +8,8 @@ local function read_file(path)
 end
 
 describe("review parser", function()
-  local parser = require("review.parser")
-  local formatter = require("review.formatter")
+  local parser = require("locoreview.parser")
+  local formatter = require("locoreview.formatter")
 
   it("parses basic fixture", function()
     local items = assert(parser.parse(read_file("tests/fixtures/review_basic.md")))

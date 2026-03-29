@@ -82,7 +82,7 @@ describe("review commands", function()
       },
     }
 
-    package.loaded["review.config"] = {
+    package.loaded["locoreview.config"] = {
       get = function()
         return {
           default_severity = "medium",
@@ -94,7 +94,7 @@ describe("review commands", function()
         }
       end,
     }
-    package.loaded["review.fs"] = {
+    package.loaded["locoreview.fs"] = {
       review_file_path = function()
         return "/repo/review.md"
       end,
@@ -102,7 +102,7 @@ describe("review commands", function()
         return true
       end,
     }
-    package.loaded["review.git"] = {
+    package.loaded["locoreview.git"] = {
       repo_root = function()
         return "/repo"
       end,
@@ -116,7 +116,7 @@ describe("review commands", function()
         return state.changed_lines[line]
       end,
     }
-    package.loaded["review.store"] = {
+    package.loaded["locoreview.store"] = {
       load = function()
         return state.items
       end,
@@ -168,7 +168,7 @@ describe("review commands", function()
         return items
       end,
     }
-    package.loaded["review.ui"] = {
+    package.loaded["locoreview.ui"] = {
       prompt_issue = function(cb)
         cb(state.issue)
       end,
@@ -184,27 +184,27 @@ describe("review commands", function()
       notify = function()
       end,
     }
-    package.loaded["review.qf"] = {
+    package.loaded["locoreview.qf"] = {
       populate = function()
       end,
       refresh = function()
       end,
     }
-    package.loaded["review.diffview"] = {
+    package.loaded["locoreview.diffview"] = {
       is_available = function()
         return false
       end,
     }
-    package.loaded["review.picker"] = {
+    package.loaded["locoreview.picker"] = {
       open = function()
       end,
     }
-    package.loaded["review.agent"] = {
+    package.loaded["locoreview.agent"] = {
       run = function()
         return true
       end,
     }
-    package.loaded["review.signs"] = {
+    package.loaded["locoreview.signs"] = {
       refresh = function()
       end,
       toggle = function()
@@ -212,7 +212,7 @@ describe("review commands", function()
       end,
     }
 
-    require("review.commands").register()
+    require("locoreview.commands").register()
   end)
 
   before_each(function()

@@ -1,7 +1,7 @@
 package.path = "./lua/?.lua;./lua/?/init.lua;" .. package.path
 
 describe("review config", function()
-  local config = require("review.config")
+  local config = require("locoreview.config")
 
   it("returns a validation error for non-table picker config", function()
     local normalized, err = config.normalize({

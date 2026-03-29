@@ -1,7 +1,7 @@
 package.path = "./lua/?.lua;./lua/?/init.lua;" .. package.path
 
 describe("review store", function()
-  local store = require("review.store")
+  local store = require("locoreview.store")
 
   it("returns RV-0001 for empty next_id", function()
     assert.are.equal("RV-0001", store.next_id({}))

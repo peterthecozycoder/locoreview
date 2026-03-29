@@ -1,6 +1,6 @@
 local M = {}
-local util = require("review.util")
-local types = require("review.types")
+local util = require("locoreview.util")
+local types = require("locoreview.types")
 
 M.defaults = {
   review_file = "review.md",

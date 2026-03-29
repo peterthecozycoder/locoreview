@@ -1,15 +1,15 @@
 local M = {}
 
-local config = require("review.config")
-local fs = require("review.fs")
-local git = require("review.git")
-local qf = require("review.qf")
-local store = require("review.store")
-local signs = require("review.signs")
-local ui = require("review.ui")
-local diffview = require("review.diffview")
-local picker = require("review.picker")
-local agent = require("review.agent")
+local config = require("locoreview.config")
+local fs = require("locoreview.fs")
+local git = require("locoreview.git")
+local qf = require("locoreview.qf")
+local store = require("locoreview.store")
+local signs = require("locoreview.signs")
+local ui = require("locoreview.ui")
+local diffview = require("locoreview.diffview")
+local picker = require("locoreview.picker")
+local agent = require("locoreview.agent")
 
 local registered = false
 local REVIEW_FILE_INITIAL_CONTENT = "# Review Comments\n\n"

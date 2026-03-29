@@ -14,12 +14,12 @@ describe("review quickfix", function()
       api = {},
       log = { levels = { ERROR = 1 } },
     }
-    package.loaded["review.git"] = {
+    package.loaded["locoreview.git"] = {
       repo_root = function()
         return "/repo"
       end,
     }
-    qf = require("review.qf")
+    qf = require("locoreview.qf")
   end)
 
   before_each(function()
