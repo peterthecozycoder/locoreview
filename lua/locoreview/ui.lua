@@ -57,6 +57,15 @@ function M.prompt_severity(default, callback)
   end)
 end
 
+function M.prompt_git_ref(default, callback)
+  vim.ui.input({
+    prompt = "Git ref: ",
+    default = default,
+  }, function(value)
+    callback(normalize_input(value))
+  end)
+end
+
 function M.prompt_confirm(prompt, callback)
   vim.ui.select({ "yes", "no" }, {
     prompt = prompt or "Confirm:",

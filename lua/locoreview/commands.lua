@@ -534,7 +534,12 @@ local function command_diff()
   end
 
   local base = git.base_branch(cfg)
-  diffview.open_diff(base)
+  ui.prompt_git_ref(base, function(ref)
+    if not ref then
+      return
+    end
+    diffview.open_diff(ref)
+  end)
 end
 
 local function command_file_history()
