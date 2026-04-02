@@ -15,6 +15,9 @@ local registered = false
 local REVIEW_FILE_INITIAL_CONTENT = "# Review Comments\n\n"
 local ERR_REVIEW_PATH = "unable to resolve review file path"
 
+local workspace = require("locoreview.workspace")
+local diff_view = require("locoreview.diff_view")
+
 local function refresh_views(items)
   qf.refresh()
   if signs.refresh then
@@ -565,6 +568,48 @@ local function command_picker()
   picker.open(items)
 end
 
+local function command_open_diff()
+  local path = review_path_or_notify()
+  if not path then
+    return
+  end
+
+  local items = load_items(path)
+  if not items then
+    return
+  end
+  if #items == 0 then
+    ui.notify("no review items found", vim.log.levels.INFO)
+    return
+  end
+
+  -- Determine which item to open based on where the cursor is.
+  -- In review.md: find item by scanning backward to the nearest ## RV-NNNN header.
+  -- In any source file: find item by file path + current line number.
+  local item
+  local current_buf = vim.api.nvim_get_current_buf()
+  local current_buf_name = vim.api.nvim_buf_get_name(current_buf)
+
+  if current_buf_name == path then
+    item = diff_view.item_at_cursor(current_buf, items)
+  else
+    local rel_file, _, path_err = path_for_buffer()
+    if not rel_file then
+      ui.notify(path_err or "current buffer has no file path", vim.log.levels.ERROR)
+      return
+    end
+    local line = vim.api.nvim_win_get_cursor(0)[1]
+    item = find_item(items, rel_file, line)
+  end
+
+  if not item then
+    ui.notify("no review item found at current location", vim.log.levels.ERROR)
+    return
+  end
+
+  workspace.open(item, items)
+end
+
 local function command_fix()
   local cfg = config.get()
   if cfg.agent and cfg.agent.enabled == false then
@@ -635,6 +680,7 @@ function M.register()
   vim.api.nvim_create_user_command("ReviewFileHistory", command_file_history, {})
   vim.api.nvim_create_user_command("ReviewPicker", command_picker, {})
   vim.api.nvim_create_user_command("ReviewFix", command_fix, {})
+  vim.api.nvim_create_user_command("ReviewOpenDiff", command_open_diff, {})
 
   registered = true
 end

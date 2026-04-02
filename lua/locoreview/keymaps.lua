@@ -19,6 +19,7 @@ local defaults = {
   refresh = "<leader>rR",
   picker = "<leader>rk",
   toggle_signs = "<leader>rs",
+  open_diff = "<leader>rv",
 }
 
 local command_for = {
@@ -40,6 +41,7 @@ local command_for = {
   refresh = "ReviewRefresh",
   picker = "ReviewPicker",
   toggle_signs = "ReviewToggleSigns",
+  open_diff = "ReviewOpenDiff",
 }
 
 function M.setup(cfg)
