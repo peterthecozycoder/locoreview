@@ -441,43 +441,6 @@ local function navigate_hunks(direction)
   end
 end
 
-local function create_sticky_header(win)
-  if state.sticky_win and vim.api.nvim_win_is_valid(state.sticky_win) then
-    return  -- Already exists
-  end
-
-  -- Create scratch buffer for the sticky header
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
-  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
-
-  -- Get window width
-  local win_width = vim.api.nvim_win_get_width(win)
-
-  -- Open float window at top of PR view window
-  local float_win = vim.api.nvim_open_win(buf, false, {
-    relative = "win",
-    win = win,
-    row = 0,
-    col = 0,
-    width = win_width,
-    height = 1,
-    focusable = false,
-    style = "minimal",
-    zindex = 50,
-  })
-
-  state.sticky_win = float_win
-  state.sticky_buf = buf
-
-  -- Register WinScrolled autocmd
-  state.sticky_autocmd = vim.api.nvim_create_autocmd("WinScrolled", {
-    callback = function()
-      update_sticky_header()
-    end,
-  })
-end
-
 local function update_sticky_header()
   if not state.sticky_win or not vim.api.nvim_win_is_valid(state.sticky_win) then
     return
@@ -520,6 +483,43 @@ local function update_sticky_header()
   end
 
   vim.api.nvim_buf_set_option(state.sticky_buf, "modifiable", false)
+end
+
+local function create_sticky_header(win)
+  if state.sticky_win and vim.api.nvim_win_is_valid(state.sticky_win) then
+    return  -- Already exists
+  end
+
+  -- Create scratch buffer for the sticky header
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+
+  -- Get window width
+  local win_width = vim.api.nvim_win_get_width(win)
+
+  -- Open float window at top of PR view window
+  local float_win = vim.api.nvim_open_win(buf, false, {
+    relative = "win",
+    win = win,
+    row = 0,
+    col = 0,
+    width = win_width,
+    height = 1,
+    focusable = false,
+    style = "minimal",
+    zindex = 50,
+  })
+
+  state.sticky_win = float_win
+  state.sticky_buf = buf
+
+  -- Register WinScrolled autocmd
+  state.sticky_autocmd = vim.api.nvim_create_autocmd("WinScrolled", {
+    callback = function()
+      update_sticky_header()
+    end,
+  })
 end
 
 local function get_context_lnums_for_hunk(hunk_header_lnum)
