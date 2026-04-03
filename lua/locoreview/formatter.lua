@@ -30,6 +30,9 @@ function M.format(items)
     table.insert(lines, "file: " .. tostring(item.file or ""))
     table.insert(lines, "line: " .. tostring(item.line or ""))
     table.insert(lines, "end_line: " .. (item.end_line and tostring(item.end_line) or ""))
+    if item.line_ref == "old" then
+      table.insert(lines, "line_ref: old")
+    end
     table.insert(lines, "severity: " .. tostring(item.severity or ""))
     table.insert(lines, "status: " .. tostring(item.status or ""))
     table.insert(lines, "author: " .. (item.author or ""))

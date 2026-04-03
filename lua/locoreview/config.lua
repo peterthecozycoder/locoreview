@@ -25,6 +25,11 @@ M.defaults = {
     cmd = "agent",
     open_in_split = true,
   },
+  pr_view = {
+    auto_advance_on_viewed = true,
+    micro_rewards = true,
+    focus_queue_order = "size",
+  },
 }
 
 local function deep_merge(base, override)

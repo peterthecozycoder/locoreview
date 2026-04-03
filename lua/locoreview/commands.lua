@@ -125,7 +125,7 @@ local function command_open()
 	vim.cmd("edit " .. vim.fn.fnameescape(path))
 end
 
-local function perform_add(start_line, end_line, rel_file)
+local function perform_add(start_line, end_line, rel_file, line_ref)
 	local cfg = config.get()
 	if not rel_file then
 		local path_err
@@ -160,7 +160,7 @@ local function perform_add(start_line, end_line, rel_file)
 					return
 				end
 
-				local next_items, inserted_or_err = store.insert(items, {
+				local item_fields = {
 					file = rel_file,
 					line = start_line,
 					end_line = end_line,
@@ -169,7 +169,12 @@ local function perform_add(start_line, end_line, rel_file)
 					issue = issue,
 					requested_change = requested_change,
 					author = cfg.default_author,
-				})
+				}
+				if line_ref then
+					item_fields.line_ref = line_ref
+				end
+
+				local next_items, inserted_or_err = store.insert(items, item_fields)
 				if not next_items then
 					ui.notify(inserted_or_err, vim.log.levels.ERROR)
 					return
@@ -699,8 +704,8 @@ end
 
 -- Called by pr_view.lua to open the ReviewAdd flow for a specific location
 -- without requiring the user to be in the source file.
-function M.add_at(rel_file, start_line, end_line)
-  perform_add(start_line, end_line, rel_file)
+function M.add_at(rel_file, start_line, end_line, line_ref)
+  perform_add(start_line, end_line, rel_file, line_ref)
 end
 
 return M

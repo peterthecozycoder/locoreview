@@ -69,10 +69,16 @@ function M.new_item(fields)
   local created_at = fields.created_at or util.now_utc()
   local updated_at = fields.updated_at or created_at
 
+  local line_ref = fields.line_ref
+  if line_ref ~= "old" then
+    line_ref = "new"
+  end
+
   return {
     id = fields.id,
     file = fields.file,
     line = line,
+    line_ref = line_ref,
     end_line = tonumber(fields.end_line),
     severity = fields.severity,
     status = fields.status,
