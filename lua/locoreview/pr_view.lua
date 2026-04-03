@@ -764,6 +764,59 @@ local function update_focus_dim()
   end
 end
 
+local function focus_advance_hunk()
+  if state.focus_level ~= 2 then
+    -- Not in focus mode; pass through <Space>
+    vim.api.nvim_feedkeys(" ", "n", false)
+    return
+  end
+
+  local current_lnum = vim.api.nvim_win_get_cursor(0)[1]
+
+  -- Find next hunk header after current position
+  local next_hunk_lnum = nil
+  for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
+    if hunk_lnum > current_lnum then
+      next_hunk_lnum = hunk_lnum
+      break
+    end
+  end
+
+  if not next_hunk_lnum then
+    return  -- No next hunk
+  end
+
+  -- Check if next hunk is in a different file
+  local next_meta = state.line_map[next_hunk_lnum]
+  local current_meta = state.line_map[current_lnum]
+  if next_meta and current_meta and next_meta.file_idx ~= current_meta.file_idx then
+    -- Find the new file in queue
+    for i, f in ipairs(state.focus_queue) do
+      if state.line_map[next_hunk_lnum].file == f then
+        state.focus_file_idx = i
+        break
+      end
+    end
+    apply_dim_layer(next_meta.file)
+  end
+
+  -- Move cursor to next hunk
+  vim.api.nvim_win_set_cursor(0, { next_hunk_lnum, 0 })
+  vim.cmd("normal! zz")
+
+  -- Apply hunk dim
+  apply_hunk_dim_layer(next_hunk_lnum)
+
+  -- Collapse all other hunks in the current file
+  local file_idx = next_meta.file_idx
+  for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
+    local hunk_meta = state.line_map[hunk_lnum]
+    if hunk_meta and hunk_meta.file_idx == file_idx and hunk_lnum ~= next_hunk_lnum then
+      collapse_hunk_context(hunk_lnum)
+    end
+  end
+end
+
 local function cycle_focus()
   state.focus_level = (state.focus_level + 1) % 3
 
@@ -819,59 +872,6 @@ local function cycle_focus()
     end
 
     vim.api.nvim_echo({ { "-- Focus: Hunk --", "ModeMsg" } }, false, {})
-  end
-end
-
-local function focus_advance_hunk()
-  if state.focus_level ~= 2 then
-    -- Not in focus mode; pass through <Space>
-    vim.api.nvim_feedkeys(" ", "n", false)
-    return
-  end
-
-  local current_lnum = vim.api.nvim_win_get_cursor(0)[1]
-
-  -- Find next hunk header after current position
-  local next_hunk_lnum = nil
-  for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
-    if hunk_lnum > current_lnum then
-      next_hunk_lnum = hunk_lnum
-      break
-    end
-  end
-
-  if not next_hunk_lnum then
-    return  -- No next hunk
-  end
-
-  -- Check if next hunk is in a different file
-  local next_meta = state.line_map[next_hunk_lnum]
-  local current_meta = state.line_map[current_lnum]
-  if next_meta and current_meta and next_meta.file_idx ~= current_meta.file_idx then
-    -- Find the new file in queue
-    for i, f in ipairs(state.focus_queue) do
-      if state.line_map[next_hunk_lnum].file == f then
-        state.focus_file_idx = i
-        break
-      end
-    end
-    apply_dim_layer(next_meta.file)
-  end
-
-  -- Move cursor to next hunk
-  vim.api.nvim_win_set_cursor(0, { next_hunk_lnum, 0 })
-  vim.cmd("normal! zz")
-
-  -- Apply hunk dim
-  apply_hunk_dim_layer(next_hunk_lnum)
-
-  -- Collapse all other hunks in the current file
-  local file_idx = next_meta.file_idx
-  for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
-    local hunk_meta = state.line_map[hunk_lnum]
-    if hunk_meta and hunk_meta.file_idx == file_idx and hunk_lnum ~= next_hunk_lnum then
-      collapse_hunk_context(hunk_lnum)
-    end
   end
 end
 
