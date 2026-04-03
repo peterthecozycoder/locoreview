@@ -100,6 +100,14 @@ local function load_review_items()
   return items or {}
 end
 
+local function run_system_list(cmd)
+  local out = vim.fn.systemlist(cmd)
+  if vim.v.shell_error ~= 0 then
+    return nil, table.concat(out or {}, "\n")
+  end
+  return out
+end
+
 -- ── Rendering ───────────────────────────────────────────────────────────────
 
 local SEP = string.rep("─", 64)
@@ -1480,13 +1488,224 @@ end
 
 local function open_source_at_cursor()
   local meta = meta_at_cursor()
-  if not meta or not meta.file then return end
-  local line = meta.new_line or meta.old_line
-  if not line then return end
+  if not meta or not meta.file then
+    ui.notify("cursor is not on a file line", vim.log.levels.WARN)
+    return
+  end
+  local line = meta.new_line or meta.old_line or 1
   local root = git.repo_root()
-  vim.cmd("tabprevious")
+  pcall(vim.cmd, "tabprevious")
   vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. meta.file))
   vim.api.nvim_win_set_cursor(0, { line, 0 })
+end
+
+local function file_path_at_cursor()
+  local meta = meta_at_cursor()
+  if not meta or not meta.file then
+    ui.notify("cursor is not on a file line", vim.log.levels.WARN)
+    return nil
+  end
+  return meta.file
+end
+
+local function absolute_path_for(file)
+  local root = git.repo_root()
+  if not root or root == "" then
+    return nil
+  end
+  return root .. "/" .. file
+end
+
+local function delete_file_at_cursor()
+  local file = file_path_at_cursor()
+  if not file then return end
+
+  local path = absolute_path_for(file)
+  if not path then
+    ui.notify("could not determine repository root", vim.log.levels.ERROR)
+    return
+  end
+
+  local rc = vim.fn.delete(path)
+  if rc ~= 0 then
+    ui.notify("failed to delete " .. file, vim.log.levels.ERROR)
+    return
+  end
+
+  M.refresh()
+  ui.notify("deleted " .. file, vim.log.levels.INFO)
+end
+
+local function rename_file_at_cursor()
+  local file = file_path_at_cursor()
+  if not file then return end
+
+  local old_path = absolute_path_for(file)
+  if not old_path then
+    ui.notify("could not determine repository root", vim.log.levels.ERROR)
+    return
+  end
+
+  local root = git.repo_root()
+  vim.ui.input({
+    prompt = "Rename file to: ",
+    default = file,
+  }, function(input)
+    if not input then
+      return
+    end
+    local target = (input:gsub("^%s+", ""):gsub("%s+$", ""))
+    if target == "" or target == file then
+      return
+    end
+
+    if target:sub(1, 1) == "/" then
+      if vim.startswith(target, root .. "/") then
+        target = target:sub(#root + 2)
+      else
+        ui.notify("path must be inside repository", vim.log.levels.ERROR)
+        return
+      end
+    end
+
+    local new_path = absolute_path_for(target)
+    if not new_path then
+      ui.notify("could not determine repository root", vim.log.levels.ERROR)
+      return
+    end
+
+    local dir = vim.fn.fnamemodify(new_path, ":h")
+    if dir and dir ~= "" then
+      vim.fn.mkdir(dir, "p")
+    end
+
+    local rc = vim.fn.rename(old_path, new_path)
+    if rc ~= 0 then
+      ui.notify("failed to rename " .. file, vim.log.levels.ERROR)
+      return
+    end
+
+    M.refresh()
+    ui.notify("renamed " .. file .. " -> " .. target, vim.log.levels.INFO)
+  end)
+end
+
+local function copy_file_path_at_cursor()
+  local file = file_path_at_cursor()
+  if not file then return end
+
+  local copied = false
+  for _, reg in ipairs({ "+", "*" }) do
+    local ok = pcall(vim.fn.setreg, reg, file)
+    copied = copied or ok
+  end
+  if not copied then
+    pcall(vim.fn.setreg, "\"", file)
+  end
+
+  ui.notify("copied path: " .. file, vim.log.levels.INFO)
+end
+
+local function view_file_diff_at_cursor()
+  local file = file_path_at_cursor()
+  if not file then return end
+
+  local cmd = { "git", "diff", "--unified=3" }
+  if state.base_ref then
+    table.insert(cmd, state.base_ref .. "...HEAD")
+  else
+    table.insert(cmd, "HEAD")
+  end
+  table.insert(cmd, "--")
+  table.insert(cmd, file)
+
+  local lines, err = run_system_list(cmd)
+  if not lines then
+    ui.notify("git diff failed: " .. (err or "unknown error"), vim.log.levels.ERROR)
+    return
+  end
+
+  if #lines == 0 then
+    ui.notify("no diff for " .. file, vim.log.levels.INFO)
+    return
+  end
+
+  vim.cmd("tabnew")
+  local buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+  vim.api.nvim_buf_set_option(buf, "swapfile", false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  vim.api.nvim_buf_set_option(buf, "filetype", "diff")
+  pcall(vim.api.nvim_buf_set_name, buf, "locoreview://file-diff/" .. file)
+end
+
+local function open_file_actions_menu()
+  local file = file_path_at_cursor()
+  if not file then return end
+
+  local actions = {
+    {
+      label = "Delete file",
+      run = delete_file_at_cursor,
+    },
+    {
+      label = "Rename file",
+      run = rename_file_at_cursor,
+    },
+    {
+      label = "Copy file path",
+      run = copy_file_path_at_cursor,
+    },
+    {
+      label = "Open in editor",
+      run = open_source_at_cursor,
+    },
+    {
+      label = "View file diff",
+      run = view_file_diff_at_cursor,
+    },
+  }
+
+  vim.ui.select(actions, {
+    prompt = "File actions: " .. file,
+    format_item = function(item) return item.label end,
+  }, function(choice)
+    if not choice or not choice.run then
+      return
+    end
+    choice.run()
+  end)
+end
+
+local function remove_resolved_comments()
+  local path = fs.review_file_path()
+  if not path then
+    ui.notify("unable to resolve review file path", vim.log.levels.ERROR)
+    return
+  end
+
+  local items, err = store.load(path)
+  if not items then
+    ui.notify(err or "unable to load review comments", vim.log.levels.ERROR)
+    return
+  end
+
+  local next_items, removed = store.delete_by_statuses(items, { "fixed", "wontfix" })
+  if removed == 0 then
+    ui.notify("no resolved comments to remove", vim.log.levels.INFO)
+    return
+  end
+
+  local ok, save_err = store.save(path, next_items)
+  if not ok then
+    ui.notify(save_err or "failed to save review file", vim.log.levels.ERROR)
+    return
+  end
+
+  M.refresh()
+  ui.notify("removed " .. removed .. " resolved comments", vim.log.levels.INFO)
 end
 
 local function attach_keymaps(buf)
@@ -1544,6 +1763,8 @@ local function attach_keymaps(buf)
   bmap("c",    add_comment_at_cursor)
   bmap("C",    add_quick_comment_at_cursor)
   bmap("K",    show_comment_popup)
+  bmap("<leader>a", open_file_actions_menu)
+  bmap("<leader>R", remove_resolved_comments)
   bmap("go",   open_source_at_cursor)
   bmap("R",    function() M.refresh() end)
   bmap("q",    function() M.close()   end)
@@ -1838,6 +2059,8 @@ function M.show_help()
     "  c          add review comment at cursor line",
     "  C          quick comment (one prompt, low severity)",
     "  K          show full comment popup",
+    "  <leader>a  quick file actions (delete/rename/copy/open/diff)",
+    "  <leader>R  remove all resolved comments (fixed + wontfix)",
     "  go         open source file at cursor line",
     "  <leader>T  start / cancel timed review session",
     "  <leader>F  cycle focus mode (Off → File → Hunk)",

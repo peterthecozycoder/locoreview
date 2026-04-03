@@ -95,6 +95,30 @@ function M.delete(items, id)
   return nil, string.format("item not found: %s", tostring(id))
 end
 
+function M.delete_by_statuses(items, statuses)
+  local status_set = {}
+  for _, status in ipairs(statuses or {}) do
+    if type(status) == "string" and status ~= "" then
+      status_set[status] = true
+    end
+  end
+
+  if next(status_set) == nil then
+    return util.deepcopy(items or {}), 0
+  end
+
+  local next_items = {}
+  local removed = 0
+  for _, item in ipairs(items or {}) do
+    if status_set[item.status] then
+      removed = removed + 1
+    else
+      table.insert(next_items, util.deepcopy(item))
+    end
+  end
+  return next_items, removed
+end
+
 function M.transition(items, id, new_status)
   local next = util.deepcopy(items or {})
   for _, item in ipairs(next) do

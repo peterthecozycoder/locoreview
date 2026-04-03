@@ -125,6 +125,7 @@ When you open a PR view with `:ReviewDiff`, these keybindings are available:
 | `v` | Mark current file as viewed (collapses hunk context) |
 | `V` | Mark current file as unviewed (expands hunk context) |
 | `<leader>v` | Mark all files in the same directory as viewed |
+| `<leader>R` | Remove all resolved comments (`fixed` + `wontfix`) with no confirmation |
 
 ### Hunk Navigation & Comments
 
@@ -134,6 +135,17 @@ When you open a PR view with `:ReviewDiff`, these keybindings are available:
 | `c` | Add a review comment at cursor line |
 | `K` | Show full comment popup for comment at cursor |
 | `go` | Open source file at cursor line in original editor |
+
+### Quick File Actions
+
+| Key | Action |
+| --- | --- |
+| `<leader>a` | Open file action menu at cursor |
+| `Delete file` | Remove file immediately (no confirmation prompt) |
+| `Rename file` | Rename file in-place |
+| `Copy file path` | Copy relative file path to clipboard |
+| `Open in editor` | Jump to the file in editor |
+| `View file diff` | Open a scratch tab with `git diff` for that file |
 
 ### Context Collapse/Expand
 
