@@ -1434,7 +1434,9 @@ local function attach_keymaps(buf)
     if lnum then expand_hunk_context(lnum) end
   end)
   bmap("zCA",  function()
-    local file_idx = state.line_map[vim.api.nvim_win_get_cursor(0)[1]].file_idx
+    local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+    local line_meta = state.line_map[cursor_line]
+    local file_idx = line_meta and line_meta.file_idx
     if file_idx then
       for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
         if state.line_map[hunk_lnum].file_idx == file_idx then
@@ -1444,7 +1446,9 @@ local function attach_keymaps(buf)
     end
   end)
   bmap("zOA",  function()
-    local file_idx = state.line_map[vim.api.nvim_win_get_cursor(0)[1]].file_idx
+    local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+    local line_meta = state.line_map[cursor_line]
+    local file_idx = line_meta and line_meta.file_idx
     if file_idx then
       for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
         if state.line_map[hunk_lnum].file_idx == file_idx then

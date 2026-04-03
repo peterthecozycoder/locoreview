@@ -34,28 +34,40 @@ require("locoreview").setup({})
 
 ## Commands
 
+### Review Management
+
 | Command | Description |
 | --- | --- |
 | `:ReviewOpen` | Open review file, create if missing |
 | `:ReviewAdd` | Add item for current line |
 | `:ReviewAddRange` | Add item for visual range |
+| `:ReviewAddDiff` | Add only on changed diff lines |
 | `:ReviewList` | Quickfix list of open items |
+| `:ReviewListAll` | Quickfix list with optional filters |
+| `:ReviewPicker` | Open picker for items |
 | `:ReviewNext` | Jump to next open item |
 | `:ReviewPrev` | Jump to previous open item |
+
+### Review Item Transitions
+
+| Command | Description |
+| --- | --- |
+| `:ReviewEdit` | Edit issue/requested_change/severity |
 | `:ReviewMarkFixed` | Transition open item to fixed |
 | `:ReviewReopen` | Transition non-open item to open |
+| `:ReviewMarkBlocked` | Transition open item to blocked |
+| `:ReviewMarkWontfix` | Transition open item to wontfix |
+| `:ReviewDelete` | Delete item at current location |
+
+### Utilities
+
+| Command | Description |
+| --- | --- |
 | `:ReviewDiff` | Open diffview against base branch |
 | `:ReviewFileHistory` | Open diffview file history |
 | `:ReviewFix` | Run external agent command |
-| `:ReviewEdit` | Edit issue/requested_change/severity |
-| `:ReviewDelete` | Delete item at current location |
-| `:ReviewMarkBlocked` | Transition open item to blocked |
-| `:ReviewMarkWontfix` | Transition open item to wontfix |
-| `:ReviewListAll` | Quickfix list with optional filters |
 | `:ReviewRefresh` | Reload signs and quickfix from disk |
-| `:ReviewPicker` | Open picker for items |
 | `:ReviewToggleSigns` | Toggle signs for session |
-| `:ReviewAddDiff` | Add only on changed diff lines |
 
 ## Configuration
 
@@ -99,6 +111,66 @@ Split parsing into parser.lua and keep store.lua focused on mutation.
 
 ---
 ```
+
+## PR View Keybindings
+
+When you open a PR view with `:ReviewDiff`, these keybindings are available:
+
+### File Navigation & State
+
+| Key | Action |
+| --- | --- |
+| `<CR>` | Toggle fold for current file (expand/collapse) |
+| `]f` / `[f` | Next / previous file |
+| `v` | Mark current file as viewed (collapses hunk context) |
+| `V` | Mark current file as unviewed (expands hunk context) |
+| `<leader>v` | Mark all files in the same directory as viewed |
+
+### Hunk Navigation & Comments
+
+| Key | Action |
+| --- | --- |
+| `]c` / `[c` | Next / previous hunk within file |
+| `c` | Add a review comment at cursor line |
+| `K` | Show full comment popup for comment at cursor |
+| `go` | Open source file at cursor line in original editor |
+
+### Context Collapse/Expand
+
+| Key | Action |
+| --- | --- |
+| `zC` | Collapse hunk context (hide unchanged lines) at current hunk |
+| `zO` | Expand hunk context (show unchanged lines) at current hunk |
+| `zCA` | Collapse all hunks in current file (shows only changed lines) |
+| `zOA` | Expand all hunks in current file (shows all context lines) |
+
+### Focus & Review Modes
+
+| Key | Action |
+| --- | --- |
+| `<leader>F` | Cycle focus mode: Off → File → Hunk |
+| `<Space>` | Advance to next hunk in sequence (Focus Hunk mode only) |
+| `<leader>T` | Start / cancel timed review session |
+
+### File Jump & Other
+
+| Key | Action |
+| --- | --- |
+| `<leader>f` | Open file jump picker (searchable file list) |
+| `R` | Refresh diff view |
+| `?` | Show this help text |
+| `q` | Close PR view |
+
+### How to Use Context Collapse
+
+The `zC` / `zO` / `zCA` / `zOA` commands let you hide or show unchanged context lines in diffs:
+
+- **`zC` at hunk**: Collapses the context lines around the current hunk (the cursor must be on a hunk header line)
+- **`zO` at hunk**: Expands the context lines for the current hunk
+- **`zCA` in file**: Collapses all hunk contexts in the current file at once (shows only changed/added/removed lines)
+- **`zOA` in file**: Expands all hunk contexts in the current file (shows all lines including unchanged context)
+
+These are particularly useful for reviewing large files with many hunks—use `zCA` to see just the changes, then `zOA` if you need to see context.
 
 ## Optional Integrations
 
