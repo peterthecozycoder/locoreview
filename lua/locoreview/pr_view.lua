@@ -166,11 +166,6 @@ local function render(file_diffs, review_items, vst)
   local file_header_lnums = {}
   local hunk_header_lnums = {}
 
-  -- Add progress line as the first line
-  local progress_line = render_progress_line(file_diffs, review_items, vst)
-  table.insert(lines, progress_line)
-  line_map[#lines] = { type = "progress" }
-
   -- Find the boundary between viewed and unviewed files
   local first_unviewed_idx = nil
   for fi, fd in ipairs(file_diffs) do
@@ -181,89 +176,174 @@ local function render(file_diffs, review_items, vst)
     end
   end
 
-  -- Add VIEWED section header if there are viewed files
-  if first_unviewed_idx and first_unviewed_idx > 1 then
-    table.insert(lines, "VIEWED (" .. (first_unviewed_idx - 1) .. ")")
-    line_map[#lines] = { type = "section_header" }
-  end
+  -- ── VIEWED section (collapsed by default) ───────────────────────────────
+  local viewed_count = first_unviewed_idx and (first_unviewed_idx - 1) or #file_diffs
+  if viewed_count > 0 then
+    table.insert(lines, "VIEWED (" .. viewed_count .. ")")
+    local viewed_header_lnum = #lines
+    line_map[viewed_header_lnum] = { type = "section_header", section = "viewed" }
 
-  for fi, fd in ipairs(file_diffs) do
-    local is_viewed = vst[fd.file] and vst[fd.file].viewed == true
+    -- Add fold range for all viewed files (collapsed)
+    local fold_start = viewed_header_lnum + 1
 
-    -- Add UNVIEWED section header at the boundary
-    if first_unviewed_idx and fi == first_unviewed_idx then
+    for fi, fd in ipairs(file_diffs) do
+      local is_viewed = vst[fd.file] and vst[fd.file].viewed == true
+      if not is_viewed then break end
+
+      -- Render file header
+      local stats   = string.format("  +%d -%d", fd.stats.added, fd.stats.removed)
+      local header  = string.format(" %s%s  [%s]  ✓", fd.file, stats, fd.status)
+      table.insert(lines, header)
+      local header_lnum = #lines
+      line_map[header_lnum] = { file = fd.file, type = "file_header",
+                                 file_idx = fi, is_viewed = true }
+      table.insert(file_header_lnums, header_lnum)
+
+      local diff_fold_start = #lines + 1
+
+      -- Separator
       table.insert(lines, SEP)
-      line_map[#lines] = { type = "section_divider" }
-      table.insert(lines, "UNVIEWED (" .. (#file_diffs - first_unviewed_idx + 1) .. ")")
-      line_map[#lines] = { type = "section_header" }
-    end
+      line_map[#lines] = { file = fd.file, type = "separator", file_idx = fi }
 
-    -- ── File header (always visible – NOT inside the fold) ─────────────────
-    local badge   = is_viewed and "  ✓ viewed" or "  ● unviewed"
-    local stats   = string.format("  +%d -%d", fd.stats.added, fd.stats.removed)
-    local header  = string.format(" %s%s  [%s]%s", fd.file, stats, fd.status, badge)
-    table.insert(lines, header)
-    local header_lnum = #lines
-    line_map[header_lnum] = { file = fd.file, type = "file_header",
-                               file_idx = fi, is_viewed = is_viewed }
-    table.insert(file_header_lnums, header_lnum)
+      -- Binary or hunks
+      if fd.status == "binary" then
+        table.insert(lines, " (binary file – diff not available)")
+        line_map[#lines] = { file = fd.file, type = "binary_note", file_idx = fi }
+      else
+        for hi, hunk in ipairs(fd.hunks) do
+          table.insert(lines, hunk.header)
+          local hh_lnum = #lines
+          line_map[hh_lnum] = { file = fd.file, type = "hunk_header",
+                                 hunk_idx = hi, file_idx = fi }
+          table.insert(hunk_header_lnums, hh_lnum)
 
-    local fold_start = #lines + 1   -- fold begins on the separator line
+          for _, dl in ipairs(hunk.lines) do
+            table.insert(lines, dl.text)
+            local lnum = #lines
+            line_map[lnum] = {
+              file     = fd.file,
+              type     = dl.type,
+              old_line = dl.old_line,
+              new_line = dl.new_line,
+              hunk_idx = hi,
+              file_idx = fi,
+            }
+          end
 
-    -- ── Separator ──────────────────────────────────────────────────────────
-    table.insert(lines, SEP)
-    line_map[#lines] = { file = fd.file, type = "separator", file_idx = fi }
-
-    -- ── Binary placeholder ─────────────────────────────────────────────────
-    if fd.status == "binary" then
-      table.insert(lines, " (binary file – diff not available)")
-      line_map[#lines] = { file = fd.file, type = "binary_note", file_idx = fi }
-
-    -- ── Hunks ──────────────────────────────────────────────────────────────
-    else
-      for hi, hunk in ipairs(fd.hunks) do
-        table.insert(lines, hunk.header)
-        local hh_lnum = #lines
-        line_map[hh_lnum] = { file = fd.file, type = "hunk_header",
-                               hunk_idx = hi, file_idx = fi }
-        table.insert(hunk_header_lnums, hh_lnum)
-
-        for _, dl in ipairs(hunk.lines) do
-          table.insert(lines, dl.text)
-          local lnum = #lines
-          line_map[lnum] = {
-            file     = fd.file,
-            type     = dl.type,
-            old_line = dl.old_line,
-            new_line = dl.new_line,
-            hunk_idx = hi,
-            file_idx = fi,
-          }
-        end
-
-        -- blank between hunks (not after the last one)
-        if hi < #fd.hunks then
-          table.insert(lines, "")
-          line_map[#lines] = { file = fd.file, type = "blank", file_idx = fi }
+          if hi < #fd.hunks then
+            table.insert(lines, "")
+            line_map[#lines] = { file = fd.file, type = "blank", file_idx = fi }
+          end
         end
       end
+
+      -- Register fold for this file's diffs (not the header)
+      local diff_fold_stop = #lines
+      if diff_fold_start <= diff_fold_stop then
+        table.insert(fold_ranges, {
+          start     = diff_fold_start,
+          stop      = diff_fold_stop,
+          file      = fd.file,
+          file_idx  = fi,
+          is_viewed = true,
+        })
+      end
+
+      table.insert(lines, "")
+      line_map[#lines] = { type = "gap" }
     end
 
-    -- ── Register fold range ────────────────────────────────────────────────
+    -- Register fold for entire VIEWED section
     local fold_stop = #lines
     if fold_start <= fold_stop then
       table.insert(fold_ranges, {
         start     = fold_start,
         stop      = fold_stop,
-        file      = fd.file,
-        file_idx  = fi,
-        is_viewed = is_viewed,
+        file      = nil,
+        is_viewed = true,
+        section   = "viewed",
       })
     end
+  end
 
-    -- ── Gap between files ──────────────────────────────────────────────────
-    table.insert(lines, "")
-    line_map[#lines] = { type = "gap" }
+  -- ── Progress line (between sections) ────────────────────────────────────
+  local progress_line = render_progress_line(file_diffs, review_items, vst)
+  table.insert(lines, progress_line)
+  line_map[#lines] = { type = "progress" }
+
+  -- ── UNVIEWED section (expanded by default) ──────────────────────────────
+  if first_unviewed_idx then
+    table.insert(lines, SEP)
+    line_map[#lines] = { type = "section_divider" }
+    table.insert(lines, "UNVIEWED (" .. (#file_diffs - first_unviewed_idx + 1) .. ")")
+    line_map[#lines] = { type = "section_header", section = "unviewed" }
+
+    for fi, fd in ipairs(file_diffs) do
+      if fi < first_unviewed_idx then goto continue end
+
+      -- File header
+      local stats   = string.format("  +%d -%d", fd.stats.added, fd.stats.removed)
+      local header  = string.format(" %s%s  [%s]  ●", fd.file, stats, fd.status)
+      table.insert(lines, header)
+      local header_lnum = #lines
+      line_map[header_lnum] = { file = fd.file, type = "file_header",
+                                 file_idx = fi, is_viewed = false }
+      table.insert(file_header_lnums, header_lnum)
+
+      local fold_start = #lines + 1
+
+      -- Separator
+      table.insert(lines, SEP)
+      line_map[#lines] = { file = fd.file, type = "separator", file_idx = fi }
+
+      -- Binary or hunks
+      if fd.status == "binary" then
+        table.insert(lines, " (binary file – diff not available)")
+        line_map[#lines] = { file = fd.file, type = "binary_note", file_idx = fi }
+      else
+        for hi, hunk in ipairs(fd.hunks) do
+          table.insert(lines, hunk.header)
+          local hh_lnum = #lines
+          line_map[hh_lnum] = { file = fd.file, type = "hunk_header",
+                                 hunk_idx = hi, file_idx = fi }
+          table.insert(hunk_header_lnums, hh_lnum)
+
+          for _, dl in ipairs(hunk.lines) do
+            table.insert(lines, dl.text)
+            local lnum = #lines
+            line_map[lnum] = {
+              file     = fd.file,
+              type     = dl.type,
+              old_line = dl.old_line,
+              new_line = dl.new_line,
+              hunk_idx = hi,
+              file_idx = fi,
+            }
+          end
+
+          if hi < #fd.hunks then
+            table.insert(lines, "")
+            line_map[#lines] = { file = fd.file, type = "blank", file_idx = fi }
+          end
+        end
+      end
+
+      local fold_stop = #lines
+      if fold_start <= fold_stop then
+        table.insert(fold_ranges, {
+          start     = fold_start,
+          stop      = fold_stop,
+          file      = fd.file,
+          file_idx  = fi,
+          is_viewed = false,
+        })
+      end
+
+      table.insert(lines, "")
+      line_map[#lines] = { type = "gap" }
+
+      ::continue::
+    end
   end
 
   -- Write buffer
