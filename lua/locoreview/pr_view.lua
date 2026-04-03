@@ -90,6 +90,15 @@ _G._locoreview_pr_foldtext = function()
   return "  " .. string.rep("─", 4) .. string.format(" %d lines ", n) .. string.rep("─", 50)
 end
 
+-- ── Utility functions ───────────────────────────────────────────────────────
+
+local function load_review_items()
+  local path = fs.review_file_path()
+  if not path then return {} end
+  local items, _ = store.load(path)
+  return items or {}
+end
+
 -- ── Rendering ───────────────────────────────────────────────────────────────
 
 local SEP = string.rep("─", 64)
@@ -1472,13 +1481,6 @@ local function do_render(file_diffs, review_items, vst)
   apply_comment_badges(lm, comment_map)
   apply_heat_map(comment_map)
   update_sticky_header()
-end
-
-local function load_review_items()
-  local path = fs.review_file_path()
-  if not path then return {} end
-  local items, _ = store.load(path)
-  return items or {}
 end
 
 -- Sort file_diffs: viewed first (stable sort), then unviewed.
