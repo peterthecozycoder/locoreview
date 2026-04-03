@@ -25,6 +25,10 @@ local function refresh_views(items)
 	if signs.refresh then
 		signs.refresh(items)
 	end
+	-- Refresh PR view if open to show updated comment badges
+	if pr_view.is_open() then
+		pr_view.refresh()
+	end
 end
 
 local function review_path_or_notify()

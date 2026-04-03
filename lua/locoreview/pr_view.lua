@@ -45,6 +45,7 @@ local state = {
   hunk_ctx_ns      = nil,  -- namespace for context-collapse extmarks
   hunk_ctx_marks   = {},   -- { hunk_header_lnum → { extmark_ids... } }
   heat_ns          = nil,  -- namespace for heat map sign extmarks
+  saved_cursor     = nil,  -- saved cursor position {lnum, col} before refresh
 }
 
 local NS_NAME = "locoreview_pr"
@@ -1231,9 +1232,12 @@ local function start_or_manage_timer()
 
         -- Create and start timer
         state.timer = vim.loop.new_timer()
-        state.timer:start(0, 10000, vim.schedule_wrap(function()
+        state.timer:start(0, 1000, vim.schedule_wrap(function()
           M.refresh()
         end))
+
+        -- Refresh immediately to show timer in progress line
+        M.refresh()
 
         ui.notify("Timer started: " .. minutes .. " minutes", vim.log.levels.INFO)
       end
@@ -1586,6 +1590,14 @@ local function do_open_or_refresh(base_ref)
     })
   end
 
+  -- Save cursor position before refresh (for non-new buffers)
+  if not is_new_buf then
+    local win = get_win()
+    if win then
+      state.saved_cursor = vim.api.nvim_win_get_cursor(win)
+    end
+  end
+
   -- Render content into buffer
   do_render(file_diffs, review_items, vst)
 
@@ -1613,6 +1625,11 @@ local function do_open_or_refresh(base_ref)
     setup_folds(win, state.fold_ranges)
     create_sticky_header(win)
     update_sticky_header()
+
+    -- Restore cursor position after refresh (for non-new buffers)
+    if not is_new_buf and state.saved_cursor then
+      vim.api.nvim_win_set_cursor(win, state.saved_cursor)
+    end
   end
 end
 
@@ -1753,6 +1770,11 @@ function M.show_help()
     "  ?          this help",
   }
   ui.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
+end
+
+-- Check if PR view is currently open
+function M.is_open()
+  return is_alive()
 end
 
 return M
