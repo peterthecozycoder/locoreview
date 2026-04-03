@@ -576,7 +576,7 @@ local function collapse_hunk_context(hunk_header_lnum)
   local last_context_lnum = context_lnums[#context_lnums]
   local virtual_text = "  [· " .. #context_lnums .. " context lines ·]"
   local id = vim.api.nvim_buf_set_extmark(state.buf, hunk_ctx_ns, last_context_lnum - 1, 0, {
-    virt_lines = { { virtual_text, "Comment" } },
+    virt_lines = { { { virtual_text, "Comment" } } },
   })
   table.insert(mark_ids, id)
 
