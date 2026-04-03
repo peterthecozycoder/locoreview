@@ -69,15 +69,25 @@ local function flush(files, current, current_hunk, raw_for_hash)
   end
 end
 
--- Run `git diff --unified=3 <base_ref>...HEAD` and parse the output.
+-- Parse a git diff.
+--
+-- base_ref  nil   → diff working tree against HEAD (all uncommitted changes)
+--           string → diff that ref...HEAD (PR / branch-comparison style)
+--
 -- Returns a list of FileDiff tables, or nil + error string.
 function M.parse(base_ref)
-  local cfg = config.get()
-  base_ref = base_ref or git.base_branch(cfg)
+  local cmd
+  if base_ref then
+    -- Three-dot: changes from the merge-base of <ref> and HEAD up to HEAD.
+    -- This mirrors what a GitHub PR shows.
+    cmd = { "git", "diff", "--unified=3", base_ref .. "...HEAD" }
+  else
+    -- Default: everything that differs between HEAD and the working tree
+    -- (staged + unstaged).  Equivalent to `git diff HEAD`.
+    cmd = { "git", "diff", "--unified=3", "HEAD" }
+  end
 
-  local raw, err = run({
-    "git", "diff", "--unified=3", base_ref .. "...HEAD",
-  })
+  local raw, err = run(cmd)
   if not raw then
     return nil, err or "git diff failed"
   end

@@ -422,11 +422,11 @@ local function load_review_items()
   return items or {}
 end
 
+-- base_ref == nil   → diff working tree against HEAD (all uncommitted changes)
+-- base_ref == string → diff <ref>...HEAD  (PR / branch-comparison style)
 local function do_open_or_refresh(base_ref)
   setup_hl()
-  local cfg = config.get()
-  base_ref = base_ref or state.base_ref or git.base_branch(cfg)
-  state.base_ref = base_ref
+  state.base_ref = base_ref   -- nil is valid; persisted so refresh reuses it
 
   -- Parse diff
   local file_diffs, err = git_diff.parse(base_ref)
@@ -434,8 +434,9 @@ local function do_open_or_refresh(base_ref)
     ui.notify("ReviewPR: " .. (err or "git diff failed"), vim.log.levels.ERROR)
     return
   end
+  local desc = base_ref and ("relative to " .. base_ref) or "uncommitted changes"
   if #file_diffs == 0 then
-    ui.notify("no changes relative to " .. base_ref, vim.log.levels.INFO)
+    ui.notify("no " .. desc, vim.log.levels.INFO)
     return
   end
   state.file_diffs = file_diffs
@@ -499,9 +500,44 @@ end
 
 -- ── Public API ───────────────────────────────────────────────────────────────
 
--- Open the PR diff view.  base_ref defaults to the configured base branch.
+-- Open the PR diff view.
+--   base_ref supplied  → use it directly (e.g. ":ReviewPR origin/main")
+--   base_ref omitted   → show a quick picker so the user can choose what to
+--                         diff against; defaults to "uncommitted changes"
 function M.open(base_ref)
-  do_open_or_refresh(base_ref)
+  if base_ref ~= nil then
+    -- Explicit ref supplied: open immediately.
+    do_open_or_refresh(base_ref)
+    return
+  end
+
+  -- No explicit ref: offer a quick-pick.
+  local cfg       = config.get()
+  local auto_base = git.base_branch(cfg)
+
+  local choices = {
+    { label = "Uncommitted changes  (git diff HEAD)",        ref = false },
+    { label = "vs " .. auto_base .. "  [PR-style]",         ref = auto_base },
+    { label = "Custom ref…",                                 ref = "custom" },
+  }
+
+  vim.ui.select(choices, {
+    prompt      = "ReviewPR: diff against",
+    format_item = function(c) return c.label end,
+  }, function(choice)
+    if not choice then return end
+    if choice.ref == "custom" then
+      ui.prompt_git_ref(auto_base, function(ref)
+        if ref then
+          -- empty input → treat as uncommitted
+          do_open_or_refresh(ref ~= "" and ref or nil)
+        end
+      end)
+    else
+      -- false → nil (uncommitted), any string → branch ref
+      do_open_or_refresh(choice.ref ~= false and choice.ref or nil)
+    end
+  end)
 end
 
 -- Re-parse the diff and re-render in the existing tab (or open a new one).
