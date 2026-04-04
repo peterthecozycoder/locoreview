@@ -11,7 +11,7 @@
 --
 -- Rhythm modes (replaces old focus levels):
 --   overview  – all files visible, no dimming (default)
---   focus     – one file at a time; <Space> advances; snoozed files skipped
+--   focus     – one file at a time; rhythm-next advances; snoozed files skipped
 --   sweep     – dim fully-reviewed files; only pending work visible
 
 local M = {}
@@ -46,6 +46,7 @@ local state = {
   rhythm_mode       = "overview",   -- "overview" | "focus" | "sweep"
   rhythm_queue      = {},
   rhythm_file_idx   = 1,
+  rhythm_advance_lhs = nil,
   saved_ui          = {},
   -- Dimming namespaces
   dim_ns            = nil,
@@ -1089,9 +1090,43 @@ end
 
 local rhythm_advance   -- forward declaration
 
+local function resolve_rhythm_advance_lhs()
+  local cfg = config.get().pr_view or {}
+  if type(cfg.rhythm_advance_key) == "string" and cfg.rhythm_advance_key ~= "" then
+    return cfg.rhythm_advance_key
+  end
+  if vim.g.mapleader == " " then
+    return "<Tab>"
+  end
+  return "<Space>"
+end
+
+local function rhythm_advance_lhs()
+  return state.rhythm_advance_lhs or resolve_rhythm_advance_lhs()
+end
+
+local function clear_rhythm_advance_map(buf)
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    state.rhythm_advance_lhs = nil
+    return
+  end
+  local lhs = rhythm_advance_lhs()
+  pcall(vim.keymap.del, "n", lhs, { buffer = buf })
+  state.rhythm_advance_lhs = nil
+end
+
+local function set_rhythm_advance_map(buf)
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
+  local lhs = resolve_rhythm_advance_lhs()
+  clear_rhythm_advance_map(buf)
+  vim.keymap.set("n", lhs, rhythm_advance, { noremap = true, silent = true, buffer = buf })
+  state.rhythm_advance_lhs = lhs
+end
+
 rhythm_advance = function()
   if state.rhythm_mode == "overview" then
-    vim.api.nvim_feedkeys(" ", "n", false)
+    local key = vim.api.nvim_replace_termcodes(rhythm_advance_lhs(), true, false, true)
+    vim.api.nvim_feedkeys(key, "n", false)
     return
   end
 
@@ -1168,9 +1203,7 @@ local function cycle_rhythm()
     state.saved_ui  = {}
     state.rhythm_queue = {}
 
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-      pcall(vim.keymap.del, "n", "<Space>", { buffer = buf })
-    end
+    clear_rhythm_advance_map(buf)
 
     M.refresh()
     vim.api.nvim_echo({ { "  Rhythm: overview — scanning", "ModeMsg" } }, false, {})
@@ -1196,13 +1229,14 @@ local function cycle_rhythm()
       end
     end
 
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-      vim.keymap.set("n", "<Space>", rhythm_advance,
-        { noremap = true, silent = true, buffer = buf })
-    end
+    set_rhythm_advance_map(buf)
 
     M.refresh()
-    vim.api.nvim_echo({ { "  Rhythm: focus — in flow  (<Space> next, s snooze)", "ModeMsg" } }, false, {})
+    vim.api.nvim_echo(
+      { { "  Rhythm: focus — in flow  (" .. rhythm_advance_lhs() .. " next, s snooze)", "ModeMsg" } },
+      false,
+      {}
+    )
 
   elseif next_mode == "sweep" then
     if state.saved_ui.laststatus  then vim.o.laststatus  = state.saved_ui.laststatus  end
@@ -1213,13 +1247,14 @@ local function cycle_rhythm()
     state.rhythm_file_idx = 1
     apply_sweep_dim()
 
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-      vim.keymap.set("n", "<Space>", rhythm_advance,
-        { noremap = true, silent = true, buffer = buf })
-    end
+    set_rhythm_advance_map(buf)
 
     M.refresh()
-    vim.api.nvim_echo({ { "  Rhythm: sweep — wrapping up  (<Space> next unreviewed)", "ModeMsg" } }, false, {})
+    vim.api.nvim_echo(
+      { { "  Rhythm: sweep — wrapping up  (" .. rhythm_advance_lhs() .. " next unreviewed)", "ModeMsg" } },
+      false,
+      {}
+    )
   end
 end
 
@@ -2307,10 +2342,7 @@ function M.close()
   state.rhythm_mode  = "overview"
   state.rhythm_queue = {}
   state.saved_ui     = {}
-
-  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-    pcall(vim.keymap.del, "n", "<Space>", { buffer = state.buf })
-  end
+  clear_rhythm_advance_map(state.buf)
 
   if state.hunk_ctx_ns and state.buf and vim.api.nvim_buf_is_valid(state.buf) then
     pcall(vim.api.nvim_buf_clear_namespace, state.buf, state.hunk_ctx_ns, 0, -1)
@@ -2334,6 +2366,7 @@ function M.close()
 end
 
 function M.show_help()
+  local advance_lhs = rhythm_advance_lhs()
   local lines = {
     "locoreview PR view",
     "  v / V         mark file reviewed / un-reviewed",
@@ -2350,7 +2383,7 @@ function M.show_help()
     "  go            open source file at cursor",
     "  <leader>T     start / cancel timed review session",
     "  <leader>F     cycle rhythm mode  (overview → focus → sweep)",
-    "  <Space>       advance to next file  (focus / sweep modes)",
+    string.format("  %s       advance to next file  (focus / sweep modes)", advance_lhs),
     "  zC / zO       collapse / expand hunk context",
     "  zCA / zOA     collapse / expand all hunks in file",
     "  <leader>f     jump-to-file picker",
@@ -2360,8 +2393,8 @@ function M.show_help()
     "",
     "Rhythm modes:",
     "  overview  — all files visible, no dimming",
-    "  focus     — one file at a time; others dimmed; <Space> advances",
-    "  sweep     — reviewed files dimmed; <Space> cycles pending files",
+    string.format("  focus     — one file at a time; others dimmed; %s advances", advance_lhs),
+    string.format("  sweep     — reviewed files dimmed; %s cycles pending files", advance_lhs),
     "",
     "File moods:",
     "  ○ untouched   ◑ in progress   ● reviewed",

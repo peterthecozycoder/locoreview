@@ -31,6 +31,7 @@ M.defaults = {
     risky_threshold        = 150,   -- lines changed to flag a file as "risky"
     generated_patterns     = nil,   -- extra patterns appended to built-in list
     action_hints           = true,  -- show bottom hint bar
+    rhythm_advance_key     = nil,   -- auto: <Space>, or <Tab> when mapleader is <Space>
   },
 }
 

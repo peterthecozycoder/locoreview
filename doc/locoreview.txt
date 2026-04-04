@@ -43,6 +43,11 @@ Key config fields:
 - `picker.enabled`, `picker.backend`
 - `diff_only`
 - `agent.enabled`, `agent.cmd`, `agent.open_in_split`
+- `pr_view.auto_advance_on_viewed`, `pr_view.micro_rewards`
+- `pr_view.risky_threshold`, `pr_view.generated_patterns`
+- `pr_view.action_hints`
+- `pr_view.rhythm_advance_key` (default auto: `<Space>`, or `<Tab>` when
+  `mapleader` is `<Space>`)
 
 ==============================================================================
 COMMANDS                                                      *locoreview-commands*

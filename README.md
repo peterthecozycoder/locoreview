@@ -87,6 +87,7 @@ require("locoreview").setup({})
 | `agent.enabled` | `boolean` | `false` |
 | `agent.cmd` | `string\|function` | `"agent"` |
 | `agent.open_in_split` | `boolean` | `true` |
+| `pr_view.rhythm_advance_key` | `string\|nil` | `nil` (auto) |
 
 ## Sample Review File
 
@@ -160,9 +161,11 @@ When you open a PR view with `:ReviewDiff`, these keybindings are available:
 
 | Key | Action |
 | --- | --- |
-| `<leader>F` | Cycle focus mode: Off → File → Hunk |
-| `<Space>` | Advance to next hunk in sequence (Focus Hunk mode only) |
+| `<leader>F` | Cycle rhythm mode: Overview → Focus → Sweep |
+| `<Space>` / `<Tab>` | Advance to next file in rhythm queue (focus/sweep) |
 | `<leader>T` | Start / cancel timed review session |
+
+`rhythm_advance_key` defaults to `<Space>`, but auto-switches to `<Tab>` when `mapleader` is `<Space>` (for example LazyVim) so `<leader>f` remains reachable.
 
 ### File Jump & Other
 
