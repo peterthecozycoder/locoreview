@@ -211,3 +211,5 @@ function M.sync(file_diffs)
   end
   return out
 end
+
+return M

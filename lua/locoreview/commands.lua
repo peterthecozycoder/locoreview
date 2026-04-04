@@ -208,15 +208,23 @@ end
 local function ensure_diff_range(file, start_line, end_line)
 	local cfg = config.get()
 	local base = git.base_branch(cfg)
-	local ranges = git.changed_lines(file, base)
+	local has_changed_lines = type(git.changed_lines) == "function"
+	local ranges = has_changed_lines and git.changed_lines(file, base) or nil
+	if has_changed_lines and type(ranges) ~= "table" then
+		ranges = {}
+	end
 	for line = start_line, end_line do
 		local lnum = tonumber(line) or 0
 		local changed = false
-		for _, r in ipairs(ranges) do
-			if lnum >= r.start and lnum <= r["end"] then
-				changed = true
-				break
+		if has_changed_lines then
+			for _, r in ipairs(ranges) do
+				if lnum >= r.start and lnum <= r["end"] then
+					changed = true
+					break
+				end
 			end
+		elseif type(git.is_line_changed) == "function" then
+			changed = git.is_line_changed(file, lnum, base)
 		end
 		if not changed then
 			ui.notify("visual selection contains unchanged lines from base diff", vim.log.levels.ERROR)
