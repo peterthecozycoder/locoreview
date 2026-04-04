@@ -46,6 +46,7 @@ local state = {
   hunk_ctx_marks   = {},   -- { hunk_header_lnum → { extmark_ids... } }
   heat_ns          = nil,  -- namespace for heat map sign extmarks
   saved_cursor     = nil,  -- saved cursor position {lnum, col} before refresh
+  pending_cursor   = nil,  -- cursor saved before UI prompts (for add_comment flow)
 }
 
 local NS_NAME = "locoreview_pr"
@@ -433,6 +434,28 @@ local function apply_comment_badges(line_map, comment_map)
           end
           vim.api.nvim_buf_set_extmark(buf, n, lnum - 1, 0, {
             virt_text     = { { "  💬 " .. table.concat(badges, " | "), "LocoCommentOld" } },
+            virt_text_pos = "eol",
+          })
+        end
+      end
+    end
+  end
+
+  -- Add comment count badge to file header lines (always visible above folds)
+  for _, header_lnum in ipairs(state.file_header_lnums) do
+    local header_meta = state.line_map[header_lnum]
+    if header_meta and header_meta.file then
+      local fc = comment_map[header_meta.file]
+      if fc then
+        local count = 0
+        for _, bucket in pairs(fc) do       -- iterates fc.new and fc.old
+          for _, items in pairs(bucket) do
+            count = count + #items
+          end
+        end
+        if count > 0 then
+          vim.api.nvim_buf_set_extmark(buf, n, header_lnum - 1, 0, {
+            virt_text = { { "  💬 " .. count, "LocoComment" } },
             virt_text_pos = "eol",
           })
         end
@@ -1171,6 +1194,10 @@ local function add_comment_at_cursor()
     return
   end
 
+  -- Save cursor before UI prompts steal focus
+  local win = get_win()
+  if win then state.pending_cursor = vim.api.nvim_win_get_cursor(win) end
+
   -- Delegate to the commands module so the full ReviewAdd flow runs.
   require("locoreview.commands").add_at(meta.file, line, nil, line_ref)
 end
@@ -1193,6 +1220,10 @@ local function add_quick_comment_at_cursor()
     ui.notify("place cursor on an added, context, or removed line to comment", vim.log.levels.WARN)
     return
   end
+
+  -- Save cursor before UI prompts steal focus
+  local win = get_win()
+  if win then state.pending_cursor = vim.api.nvim_win_get_cursor(win) end
 
   -- Prompt for issue text only
   vim.ui.input(
@@ -1641,41 +1672,127 @@ local function view_file_diff_at_cursor()
   pcall(vim.api.nvim_buf_set_name, buf, "locoreview://file-diff/" .. file)
 end
 
-local function open_file_actions_menu()
+local function add_to_gitignore_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
 
+  local root = git.repo_root()
+  local gitignore_path = root .. "/.gitignore"
+  local f = io.open(gitignore_path, "a")
+  if not f then
+    ui.notify("failed to open .gitignore", vim.log.levels.ERROR)
+    return
+  end
+  f:write(file .. "\n")
+  f:close()
+
+  ui.notify("added " .. file .. " to .gitignore", vim.log.levels.INFO)
+end
+
+local function remove_from_tracking_at_cursor()
+  local file = file_path_at_cursor()
+  if not file then return end
+
+  local root = git.repo_root()
+  vim.fn.system({ "git", "-C", root, "rm", "--cached", "--", file })
+  if vim.v.shell_error ~= 0 then
+    ui.notify("git rm --cached failed", vim.log.levels.ERROR)
+    return
+  end
+
+  M.refresh()
+  ui.notify("removed " .. file .. " from tracking", vim.log.levels.INFO)
+end
+
+local function reset_file_at_cursor()
+  local file = file_path_at_cursor()
+  if not file then return end
+
+  local root = git.repo_root()
+  vim.fn.system({ "git", "-C", root, "checkout", "--", file })
+  if vim.v.shell_error ~= 0 then
+    ui.notify("git checkout -- failed", vim.log.levels.ERROR)
+    return
+  end
+
+  M.refresh()
+  ui.notify("reset " .. file, vim.log.levels.INFO)
+end
+
+local function reset_hunk_at_cursor()
+  local meta = meta_at_cursor()
+  if not meta or not meta.hunk_idx or not meta.file_idx then
+    ui.notify("cursor is not on a hunk line", vim.log.levels.WARN)
+    return
+  end
+
+  local fd = state.file_diffs[meta.file_idx]
+  if not fd then return end
+
+  local hunk = fd.hunks[meta.hunk_idx]
+  if not hunk then return end
+
+  -- Reconstruct patch text
+  local patch_lines = {
+    "--- a/" .. fd.old_file,
+    "+++ b/" .. fd.file,
+    hunk.header,
+  }
+  for _, dl in ipairs(hunk.lines) do
+    table.insert(patch_lines, dl.text)
+  end
+  local patch_text = table.concat(patch_lines, "\n") .. "\n"
+
+  -- Write to temp file and apply in reverse
+  local tmpfile = vim.fn.tempname()
+  local f = io.open(tmpfile, "w")
+  if not f then
+    ui.notify("failed to create temp file", vim.log.levels.ERROR)
+    return
+  end
+  f:write(patch_text)
+  f:close()
+
+  local root = git.repo_root()
+  vim.fn.system({ "git", "-C", root, "apply", "--reverse", tmpfile })
+  vim.fn.delete(tmpfile)
+
+  if vim.v.shell_error ~= 0 then
+    ui.notify("git apply --reverse failed", vim.log.levels.ERROR)
+    return
+  end
+
+  M.refresh()
+  ui.notify("reset hunk in " .. fd.file, vim.log.levels.INFO)
+end
+
+local function open_file_actions_menu()
+  local meta = meta_at_cursor()
+  if not meta or not meta.file then return end
+
   local actions = {
-    {
-      label = "Delete file",
-      run = delete_file_at_cursor,
-    },
-    {
-      label = "Rename file",
-      run = rename_file_at_cursor,
-    },
-    {
-      label = "Copy file path",
-      run = copy_file_path_at_cursor,
-    },
-    {
-      label = "Open in editor",
-      run = open_source_at_cursor,
-    },
-    {
-      label = "View file diff",
-      run = view_file_diff_at_cursor,
-    },
+    { label = "Delete file",                       run = delete_file_at_cursor },
+    { label = "Add to .gitignore",                 run = add_to_gitignore_at_cursor },
+    { label = "Remove from tracking (git rm)",     run = remove_from_tracking_at_cursor },
+    { label = "Reset file (git checkout --)",      run = reset_file_at_cursor },
+    { label = "Rename file",                       run = rename_file_at_cursor },
+    { label = "Copy file path",                    run = copy_file_path_at_cursor },
+    { label = "Open in editor",                    run = open_source_at_cursor },
+    { label = "View file diff",                    run = view_file_diff_at_cursor },
   }
 
+  -- Add hunk-specific action if cursor is on a hunk-related line
+  if meta.hunk_idx then
+    table.insert(actions, { label = "Reset hunk (git apply --reverse)", run = reset_hunk_at_cursor })
+  end
+
   vim.ui.select(actions, {
-    prompt = "File actions: " .. file,
+    prompt = "File actions: " .. meta.file,
     format_item = function(item) return item.label end,
   }, function(choice)
-    if not choice or not choice.run then
-      return
+    if choice and choice.run then
+      choice.run()
     end
-    choice.run()
   end)
 end
 
@@ -1894,9 +2011,9 @@ local function do_open_or_refresh(base_ref)
   -- Save cursor position before refresh (for non-new buffers)
   if not is_new_buf then
     local win = get_win()
-    if win then
-      state.saved_cursor = vim.api.nvim_win_get_cursor(win)
-    end
+    local cur = (win and vim.api.nvim_win_get_cursor(win)) or state.pending_cursor
+    if cur then state.saved_cursor = cur end
+    state.pending_cursor = nil
   end
 
   -- Render content into buffer
