@@ -1,13 +1,18 @@
 -- pr_view.lua
--- GitHub-style single-scroll PR diff view.
+-- Cozy single-scroll PR diff view with review rhythm modes.
 --
 -- Architecture:
 --   One scratch buffer holds all diffs as a continuous document.
 --   Each file section is wrapped in a manual fold (separator → last diff line).
 --   The file header line sits ABOVE the fold so it is always visible.
---   Viewed files start with their fold collapsed.
+--   Reviewed files start with their fold collapsed.
 --   Comment badges from review.md are overlaid as virtual text.
---   All actions (view, comment, open source) are buffer-local keymaps.
+--   All actions are buffer-local keymaps.
+--
+-- Rhythm modes (replaces old focus levels):
+--   overview  – all files visible, no dimming (default)
+--   focus     – one file at a time; <Space> advances; snoozed files skipped
+--   sweep     – dim fully-reviewed files; only pending work visible
 
 local M = {}
 
@@ -19,80 +24,120 @@ local store        = require("locoreview.store")
 local ui           = require("locoreview.ui")
 local viewed_state = require("locoreview.viewed_state")
 
--- ── Module state ────────────────────────────────────────────────────────────
+-- ── Module state ─────────────────────────────────────────────────────────────
 
 local state = {
-  buf              = nil,
-  tabpage          = nil,
-  line_map         = {},   -- 1-indexed lnum → metadata table
-  fold_ranges      = {},   -- [{start, stop, file, is_viewed}]
-  file_header_lnums = {},  -- 1-indexed lnums of file-header lines (sorted)
-  hunk_header_lnums = {},  -- 1-indexed lnums of hunk-header lines (sorted)
-  file_diffs       = {},
-  base_ref         = nil,
-  timer            = nil,   -- vim.loop timer handle, or nil
-  timer_end        = nil,   -- os.time() when timer expires, or nil
-  sticky_win       = nil,   -- window handle for the sticky header float
-  sticky_buf       = nil,   -- buffer for the sticky header float
-  sticky_autocmd   = nil,   -- autocmd id for WinScrolled
-  focus_level      = 0,    -- 0 = off, 1 = file, 2 = hunk
-  dim_ns           = nil,  -- namespace for file-level dimming
-  hunk_dim_ns      = nil,  -- namespace for hunk-level dimming
-  focus_queue      = {},   -- ordered list of file paths (priority queue)
-  focus_file_idx   = 1,    -- current position in focus_queue
-  focus_hunk_idx   = 1,    -- current hunk index within focus_queue[focus_file_idx]
-  saved_ui         = {},   -- saved vim options: { laststatus, showtabline }
-  hunk_ctx_ns      = nil,  -- namespace for context-collapse extmarks
-  hunk_ctx_marks   = {},   -- { hunk_header_lnum → { extmark_ids... } }
-  heat_ns          = nil,  -- namespace for heat map sign extmarks
-  saved_cursor     = nil,  -- saved cursor position {lnum, col} before refresh
-  pending_cursor   = nil,  -- cursor saved before UI prompts (for add_comment flow)
+  buf               = nil,
+  tabpage           = nil,
+  line_map          = {},
+  fold_ranges       = {},
+  file_header_lnums = {},
+  hunk_header_lnums = {},
+  file_diffs        = {},
+  base_ref          = nil,
+  timer             = nil,
+  timer_end         = nil,
+  session_start     = nil,          -- os.time() when PR view was opened
+  -- Sticky header float
+  sticky_win        = nil,
+  sticky_buf        = nil,
+  sticky_autocmd    = nil,
+  -- Rhythm mode
+  rhythm_mode       = "overview",   -- "overview" | "focus" | "sweep"
+  rhythm_queue      = {},
+  rhythm_file_idx   = 1,
+  saved_ui          = {},
+  -- Dimming namespaces
+  dim_ns            = nil,
+  -- Hunk spotlight
+  hunk_spot_ns      = nil,
+  active_file       = nil,
+  active_hunk_lnum  = nil,
+  -- Hunk context collapse
+  hunk_ctx_ns       = nil,
+  hunk_ctx_marks    = {},
+  -- Heat map
+  heat_ns           = nil,
+  -- Action hint bar
+  hint_win          = nil,
+  hint_buf          = nil,
+  hint_autocmd      = nil,
+  -- Tint namespace
+  tint_ns           = nil,
+  -- Cursor persistence
+  saved_cursor      = nil,
+  pending_cursor    = nil,
+  -- Debounce timer for in_progress marking
+  _ip_timer         = nil,
 }
 
 local NS_NAME = "locoreview_pr"
 local ns      = nil
 
 local function ensure_ns()
-  if not ns then
-    ns = vim.api.nvim_create_namespace(NS_NAME)
-  end
+  if not ns then ns = vim.api.nvim_create_namespace(NS_NAME) end
   return ns
 end
 
--- ── Highlight groups ────────────────────────────────────────────────────────
+-- ── Highlight groups ──────────────────────────────────────────────────────────
 
 local function setup_hl()
   local defs = {
-    LocoFileHeader     = { link = "Title" },
-    LocoFileViewed     = { link = "Comment" },
-    LocoHunkHeader     = { link = "Special" },
-    LocoViewed         = { link = "DiagnosticSignOk" },
-    LocoUnviewed       = { link = "DiagnosticSignWarn" },
-    LocoComment        = { link = "DiagnosticVirtualTextInfo" },
-    LocoCommentOld     = { link = "DiagnosticVirtualTextWarn" },
-    LocoDiffSep        = { link = "LineNr" },
-    LocoBinaryNote     = { link = "Comment" },
-    LocoSectionHeader  = { link = "Type" },
-    LocoSectionDivider = { link = "VertSplit" },
+    -- File headers
+    LocoFileHeader    = { link = "Title" },
+    LocoFileViewed    = { link = "Comment" },
+    LocoFileDir       = { link = "Comment" },
+    LocoFileActive    = { link = "CursorLine" },
+
+    -- Hunk headers and spotlight
+    LocoHunkHeader    = { link = "Special" },
+    LocoHunkActive    = { link = "CursorLine" },
+    LocoHunkDim       = { link = "Comment" },
+    LocoHunkGutter    = { link = "DiagnosticSignHint" },
+
+    -- File mood dots
+    LocoMoodUntouched  = { link = "Comment" },
+    LocoMoodInProgress = { link = "DiagnosticSignInfo" },
+    LocoMoodReviewed   = { link = "DiagnosticSignOk" },
+    LocoMoodSnoozed    = { link = "DiagnosticSignWarn" },
+    LocoMoodBlocked    = { link = "DiagnosticSignError" },
+    LocoMoodGenerated  = { link = "Comment" },
+    LocoMoodRisky      = { link = "DiagnosticSignWarn" },
+
+    -- Diff
+    LocoComment       = { link = "DiagnosticVirtualTextInfo" },
+    LocoCommentOld    = { link = "DiagnosticVirtualTextWarn" },
+    LocoCommentChip   = { link = "DiagnosticVirtualTextInfo" },
+    LocoDiffSep       = { link = "LineNr" },
+    LocoBinaryNote    = { link = "Comment" },
+    LocoStatsDim      = { link = "NonText" },
+
+    -- Sections and progress
+    LocoSectionHeader  = { link = "Comment" },
     LocoProgressBar    = { link = "Statement" },
     LocoTimerWarn      = { link = "DiagnosticSignError" },
-    LocoHeatLow        = { link = "DiagnosticSignWarn" },
-    LocoHeatHigh       = { link = "DiagnosticSignError" },
+    LocoSuccess        = { link = "DiagnosticSignOk" },
+
+    -- Heat map
+    LocoHeatLow       = { link = "DiagnosticSignWarn" },
+    LocoHeatHigh      = { link = "DiagnosticSignError" },
+
+    -- Sweep dim
+    LocoSweepDim      = { link = "Comment" },
   }
   for name, attrs in pairs(defs) do
     vim.api.nvim_set_hl(0, name, attrs)
   end
 end
 
--- ── Fold text ───────────────────────────────────────────────────────────────
+-- ── Fold text ─────────────────────────────────────────────────────────────────
 
--- Global so vimscript's v:lua can reach it.
 _G._locoreview_pr_foldtext = function()
   local n = vim.v.foldend - vim.v.foldstart + 1
   return "  " .. string.rep("─", 4) .. string.format(" %d lines ", n) .. string.rep("─", 50)
 end
 
--- ── Utility functions ───────────────────────────────────────────────────────
+-- ── Helpers ───────────────────────────────────────────────────────────────────
 
 local function load_review_items()
   local path = fs.review_file_path()
@@ -103,259 +148,370 @@ end
 
 local function run_system_list(cmd)
   local out = vim.fn.systemlist(cmd)
-  if vim.v.shell_error ~= 0 then
-    return nil, table.concat(out or {}, "\n")
-  end
+  if vim.v.shell_error ~= 0 then return nil, table.concat(out or {}, "\n") end
   return out
 end
 
--- ── Rendering ───────────────────────────────────────────────────────────────
-
-local SEP = string.rep("─", 64)
-
--- Render the progress line showing review progress and optionally a timer.
-local function render_progress_line(file_diffs, review_items, vst)
-  local viewed_count = 0
-  for _, fd in ipairs(file_diffs) do
-    if vst[fd.file] and vst[fd.file].viewed == true then
-      viewed_count = viewed_count + 1
-    end
+local function current_branch_name()
+  local out = vim.fn.systemlist({ "git", "rev-parse", "--abbrev-ref", "HEAD" })
+  if vim.v.shell_error == 0 and out and out[1] and out[1] ~= "" then
+    return out[1]
   end
-  local total_count = #file_diffs
-  local pct = (total_count > 0) and math.floor((viewed_count / total_count) * 100) or 0
-
-  -- Progress bar: 12 chars, filled with ▓
-  local bar_len = 12
-  local filled = math.floor((viewed_count / total_count) * bar_len)
-  local bar = string.rep("▓", filled) .. string.rep("░", bar_len - filled)
-
-  -- Branch name
-  local branch = state.base_ref or "HEAD"
-
-  -- Comment count
-  local comment_count = #(review_items or {})
-
-  -- Timer info if active
-  local timer_str = ""
-  if state.timer_end ~= nil then
-    local remaining = state.timer_end - os.time()
-    if remaining > 0 then
-      local mins = math.floor(remaining / 60)
-      local secs = remaining % 60
-      timer_str = string.format("  │  ⏱ %02d:%02d", mins, secs)
-    else
-      timer_str = "  │  ✦ Time's up"
-    end
-  end
-
-  return string.format("  %s  │  %d/%d reviewed  %s  %d%%  │  %d comments%s",
-    branch, viewed_count, total_count, bar, pct, comment_count, timer_str)
+  return state.base_ref or "HEAD"
 end
 
--- Build {file → {new = {new_line → [items]}, old = {old_line → [items]}}} for fast lookup during decoration.
+local function get_entry_mood(entry)
+  if not entry then return "untouched" end
+  return entry.mood or (entry.viewed and "reviewed" or "untouched")
+end
+
 local function build_comment_map(items)
   local map = {}
   for _, item in ipairs(items or {}) do
     map[item.file] = map[item.file] or { new = {}, old = {} }
-    local line_ref = item.line_ref or "new"
-    local bucket = (line_ref == "old") and map[item.file].old or map[item.file].new
+    local bucket = (item.line_ref == "old") and map[item.file].old or map[item.file].new
     bucket[item.line] = bucket[item.line] or {}
     table.insert(bucket[item.line], item)
   end
   return map
 end
 
--- Fill state.buf with all diff content and return ancillary structures.
-local function render(file_diffs, review_items, vst)
-  local buf = state.buf
-
-  local lines            = {}
-  local line_map         = {}
-  local fold_ranges      = {}
-  local file_header_lnums = {}
-  local hunk_header_lnums = {}
-
-  -- Find the boundary between viewed and unviewed files
-  local first_unviewed_idx = nil
-  for fi, fd in ipairs(file_diffs) do
-    local is_viewed = vst[fd.file] and vst[fd.file].viewed == true
-    if not is_viewed then
-      first_unviewed_idx = fi
-      break
+local function comment_count_for(file, comment_map)
+  local count = 0
+  if comment_map[file] then
+    for _, bucket in pairs(comment_map[file]) do
+      for _, items in pairs(bucket) do
+        count = count + #items
+      end
     end
   end
+  return count
+end
 
-  -- ── VIEWED section (collapsed by default) ───────────────────────────────
-  local viewed_count = first_unviewed_idx and (first_unviewed_idx - 1) or #file_diffs
-  if viewed_count > 0 then
-    table.insert(lines, "VIEWED (" .. viewed_count .. ")")
-    local viewed_header_lnum = #lines
-    line_map[viewed_header_lnum] = { type = "section_header", section = "viewed" }
+-- Effective mood: session > generated > computed (blocked/risky) > persisted
+local function get_file_effective_mood(file, vst, comment_map, fd)
+  if viewed_state.is_snoozed(file) then return "snoozed" end
 
-    -- Add fold range for all viewed files (collapsed)
-    local fold_start = viewed_header_lnum + 1
+  local mood = get_entry_mood(vst[file])
+  if mood == "reviewed" then return "reviewed" end
 
-    for fi, fd in ipairs(file_diffs) do
-      local is_viewed = vst[fd.file] and vst[fd.file].viewed == true
-      if not is_viewed then break end
+  local cfg = config.get()
 
-      -- Render file header
-      local stats   = string.format("  +%d -%d", fd.stats.added, fd.stats.removed)
-      local header  = string.format(" %s%s  [%s]  ✓", fd.file, stats, fd.status)
-      table.insert(lines, header)
-      local header_lnum = #lines
-      line_map[header_lnum] = { file = fd.file, type = "file_header",
-                                 file_idx = fi, is_viewed = true }
-      table.insert(file_header_lnums, header_lnum)
+  if viewed_state.is_generated(file, cfg.pr_view and cfg.pr_view.generated_patterns) then
+    return "generated"
+  end
 
-      local diff_fold_start = #lines + 1
-
-      -- Separator
-      table.insert(lines, SEP)
-      line_map[#lines] = { file = fd.file, type = "separator", file_idx = fi }
-
-      -- Binary or hunks
-      if fd.status == "binary" then
-        table.insert(lines, " (binary file – diff not available)")
-        line_map[#lines] = { file = fd.file, type = "binary_note", file_idx = fi }
-      else
-        for hi, hunk in ipairs(fd.hunks) do
-          table.insert(lines, hunk.header)
-          local hh_lnum = #lines
-          line_map[hh_lnum] = { file = fd.file, type = "hunk_header",
-                                 hunk_idx = hi, file_idx = fi }
-          table.insert(hunk_header_lnums, hh_lnum)
-
-          for _, dl in ipairs(hunk.lines) do
-            table.insert(lines, dl.text)
-            local lnum = #lines
-            line_map[lnum] = {
-              file     = fd.file,
-              type     = dl.type,
-              old_line = dl.old_line,
-              new_line = dl.new_line,
-              hunk_idx = hi,
-              file_idx = fi,
-            }
-          end
-
-          if hi < #fd.hunks then
-            table.insert(lines, "")
-            line_map[#lines] = { file = fd.file, type = "blank", file_idx = fi }
+  if comment_map and comment_map[file] then
+    for _, bucket in pairs(comment_map[file]) do
+      for _, items in pairs(bucket) do
+        for _, item in ipairs(items) do
+          if item.status == "open" and item.severity == "high" then
+            return "blocked"
           end
         end
       end
+    end
+  end
 
-      -- Register fold for this file's diffs (not the header)
-      local diff_fold_stop = #lines
-      if diff_fold_start <= diff_fold_stop then
-        table.insert(fold_ranges, {
-          start     = diff_fold_start,
-          stop      = diff_fold_stop,
-          file      = fd.file,
-          file_idx  = fi,
-          is_viewed = true,
-        })
+  if fd then
+    local threshold = (cfg.pr_view and cfg.pr_view.risky_threshold) or 150
+    if (fd.stats.added + fd.stats.removed) >= threshold
+        and comment_count_for(file, comment_map) == 0 then
+      return "risky"
+    end
+  end
+
+  return mood
+end
+
+local MOOD_DOT = {
+  untouched   = "○",
+  in_progress = "◑",
+  reviewed    = "●",
+  snoozed     = "⏸",
+  blocked     = "⊗",
+  generated   = "⌁",
+  risky       = "⚠",
+}
+
+local MOOD_HL = {
+  untouched   = "LocoMoodUntouched",
+  in_progress = "LocoMoodInProgress",
+  reviewed    = "LocoMoodReviewed",
+  snoozed     = "LocoMoodSnoozed",
+  blocked     = "LocoMoodBlocked",
+  generated   = "LocoMoodGenerated",
+  risky       = "LocoMoodRisky",
+}
+
+-- ── Rendering ─────────────────────────────────────────────────────────────────
+
+local SEP = string.rep("─", 64)
+
+local function ambient_label(pct)
+  if pct >= 100 then return "all done ✦"
+  elseif pct >= 81 then return "final polish"
+  elseif pct >= 51 then return "deep pass"
+  elseif pct >= 21 then return "in flow"
+  else return "settling in"
+  end
+end
+
+local function render_dashboard_line(file_diffs, review_items, vst)
+  local reviewed_count, snoozed_count = 0, 0
+  for _, fd in ipairs(file_diffs) do
+    if viewed_state.is_snoozed(fd.file) then
+      snoozed_count = snoozed_count + 1
+    elseif get_entry_mood(vst[fd.file]) == "reviewed" then
+      reviewed_count = reviewed_count + 1
+    end
+  end
+  local total = #file_diffs
+  local pct   = total > 0 and math.floor(reviewed_count / total * 100) or 0
+
+  local bar_len = 14
+  local filled  = total > 0 and math.floor(reviewed_count / total * bar_len) or 0
+  local bar     = string.rep("▓", filled) .. string.rep("░", bar_len - filled)
+
+  local branch  = current_branch_name()
+  local ambient = ambient_label(pct)
+  local n_comments = #(review_items or {})
+
+  local parts = {
+    "  " .. branch,
+    ambient,
+    reviewed_count .. " of " .. total .. " reviewed  " .. bar .. "  " .. pct .. "%",
+    n_comments .. " comment" .. (n_comments == 1 and "" or "s"),
+  }
+
+  if snoozed_count > 0 then
+    table.insert(parts, snoozed_count .. " snoozed")
+  end
+
+  if state.rhythm_mode ~= "overview" then
+    table.insert(parts, "[" .. state.rhythm_mode .. "]")
+  end
+
+  if state.timer_end ~= nil then
+    local remaining = state.timer_end - os.time()
+    if remaining > 0 then
+      table.insert(parts, string.format("⏱ %02d:%02d", math.floor(remaining / 60), remaining % 60))
+    else
+      table.insert(parts, "✦ time's up")
+    end
+  end
+
+  return table.concat(parts, "  ·  ")
+end
+
+-- Gentle section header: ─── label (N) ──────…
+local function make_section_header(label, count)
+  local inner = "─── " .. label .. " (" .. count .. ")"
+  local fill  = math.max(0, 58 - #inner)
+  return "  " .. inner .. string.rep("─", fill)
+end
+
+-- File header text + position metadata for inline highlights.
+-- Returns: text, meta_positions
+local function make_file_header(fd, mood)
+  local dot  = MOOD_DOT[mood] or "○"
+  local dir  = vim.fn.fnamemodify(fd.file, ":h")
+  local name = vim.fn.fnamemodify(fd.file, ":t")
+
+  local path_display, dir_byte_len
+  if dir == "." then
+    path_display  = name
+    dir_byte_len  = 0
+  else
+    path_display  = dir .. "/" .. name
+    dir_byte_len  = #dir + 1   -- include the "/"
+  end
+
+  local status = fd.status or "modified"
+
+  -- Layout: "  [dot]  [path]   [status]"
+  -- Col 0-1 : "  "   (2 bytes)
+  -- Col 2-4 : dot    (3 bytes — all our dots are 3-byte UTF-8)
+  -- Col 5-6 : "  "   (2 bytes)
+  -- Col 7+  : path   (#path_display bytes)
+  -- Then "   " + status
+  local text = "  " .. dot .. "  " .. path_display .. "   " .. status
+
+  local path_col   = 7                          -- 0-indexed byte col of path start
+  local name_col   = path_col + dir_byte_len     -- byte col of filename within path
+  local status_col = path_col + #path_display + 3
+
+  return text, {
+    dot_col    = 2,
+    dot_len    = 3,
+    path_col   = path_col,
+    dir_len    = dir_byte_len,
+    name_col   = name_col,
+    name_len   = #name,
+    status_col = status_col,
+    status_len = #status,
+    fd         = fd,
+  }
+end
+
+-- Main render: fills state.buf and returns ancillary structures.
+local function render(file_diffs, review_items, vst)
+  local buf = state.buf
+
+  local lines             = {}
+  local line_map          = {}
+  local fold_ranges       = {}
+  local file_header_lnums = {}
+  local hunk_header_lnums = {}
+
+  local comment_map = build_comment_map(review_items)
+
+  -- Pre-compute effective mood for every file
+  local file_moods = {}
+  for _, fd in ipairs(file_diffs) do
+    file_moods[fd.file] = get_file_effective_mood(fd.file, vst, comment_map, fd)
+  end
+
+  -- Split into reviewed vs to-review
+  local first_unreviewed_idx = nil
+  for fi, fd in ipairs(file_diffs) do
+    if file_moods[fd.file] ~= "reviewed" then
+      first_unreviewed_idx = fi
+      break
+    end
+  end
+  local reviewed_count = first_unreviewed_idx and (first_unreviewed_idx - 1) or #file_diffs
+
+  -- Helper: append file section (hunks + separator)
+  local function append_file_section(fi, fd, is_reviewed)
+    local mood   = file_moods[fd.file]
+    local text, hdr_pos = make_file_header(fd, mood)
+    table.insert(lines, text)
+    local header_lnum = #lines
+    line_map[header_lnum] = vim.tbl_extend("force", hdr_pos, {
+      file      = fd.file,
+      type      = "file_header",
+      file_idx  = fi,
+      mood      = mood,
+      is_viewed = is_reviewed,   -- backwards compat
+    })
+    table.insert(file_header_lnums, header_lnum)
+
+    local fold_start = #lines + 1
+
+    table.insert(lines, SEP)
+    line_map[#lines] = { file = fd.file, type = "separator", file_idx = fi }
+
+    if fd.status == "binary" then
+      table.insert(lines, "  (binary file – diff not available)")
+      line_map[#lines] = { file = fd.file, type = "binary_note", file_idx = fi }
+    else
+      for hi, hunk in ipairs(fd.hunks) do
+        table.insert(lines, hunk.header)
+        local hh_lnum = #lines
+        line_map[hh_lnum] = { file = fd.file, type = "hunk_header",
+                               hunk_idx = hi, file_idx = fi }
+        table.insert(hunk_header_lnums, hh_lnum)
+
+        for _, dl in ipairs(hunk.lines) do
+          table.insert(lines, dl.text)
+          local lnum = #lines
+          line_map[lnum] = {
+            file     = fd.file,
+            type     = dl.type,
+            old_line = dl.old_line,
+            new_line = dl.new_line,
+            hunk_idx = hi,
+            file_idx = fi,
+          }
+        end
+
+        if hi < #fd.hunks then
+          table.insert(lines, "")
+          line_map[#lines] = { file = fd.file, type = "blank", file_idx = fi }
+        end
       end
-
-      table.insert(lines, "")
-      line_map[#lines] = { type = "gap" }
     end
 
-    -- Register fold for entire VIEWED section
     local fold_stop = #lines
     if fold_start <= fold_stop then
       table.insert(fold_ranges, {
         start     = fold_start,
         stop      = fold_stop,
-        file      = nil,
-        is_viewed = true,
-        section   = "viewed",
+        file      = fd.file,
+        file_idx  = fi,
+        is_viewed = is_reviewed,
+      })
+    end
+
+    -- Breathing room between files
+    table.insert(lines, "")
+    line_map[#lines] = { type = "gap" }
+  end
+
+  -- ── REVIEWED section ──────────────────────────────────────────────────────
+  if reviewed_count > 0 then
+    table.insert(lines, make_section_header("reviewed", reviewed_count))
+    line_map[#lines] = { type = "section_header", section = "reviewed" }
+    local fold_start = #lines + 1
+
+    for fi, fd in ipairs(file_diffs) do
+      if file_moods[fd.file] ~= "reviewed" then break end
+      append_file_section(fi, fd, true)
+    end
+
+    local fold_stop = #lines
+    if fold_start <= fold_stop then
+      table.insert(fold_ranges, {
+        start = fold_start, stop = fold_stop,
+        file = nil, is_viewed = true, section = "reviewed",
       })
     end
   end
 
-  -- ── Progress line (between sections) ────────────────────────────────────
-  local progress_line = render_progress_line(file_diffs, review_items, vst)
-  table.insert(lines, progress_line)
+  -- ── Dashboard line ────────────────────────────────────────────────────────
+  table.insert(lines, "")
+  line_map[#lines] = { type = "gap" }
+  table.insert(lines, render_dashboard_line(file_diffs, review_items, vst))
   line_map[#lines] = { type = "progress" }
+  table.insert(lines, "")
+  line_map[#lines] = { type = "gap" }
 
-  -- ── UNVIEWED section (expanded by default) ──────────────────────────────
-  if first_unviewed_idx then
-    table.insert(lines, SEP)
-    line_map[#lines] = { type = "section_divider" }
-    table.insert(lines, "UNVIEWED (" .. (#file_diffs - first_unviewed_idx + 1) .. ")")
+  -- ── TO REVIEW section ─────────────────────────────────────────────────────
+  if first_unreviewed_idx then
+    local unreviewed_count = #file_diffs - first_unreviewed_idx + 1
+    table.insert(lines, make_section_header("to review", unreviewed_count))
     line_map[#lines] = { type = "section_header", section = "unviewed" }
 
     for fi, fd in ipairs(file_diffs) do
-      if fi < first_unviewed_idx then goto continue end
+      if fi < first_unreviewed_idx then goto continue end
+      append_file_section(fi, fd, false)
+      ::continue::
+    end
 
-      -- File header
-      local stats   = string.format("  +%d -%d", fd.stats.added, fd.stats.removed)
-      local header  = string.format(" %s%s  [%s]  ●", fd.file, stats, fd.status)
-      table.insert(lines, header)
-      local header_lnum = #lines
-      line_map[header_lnum] = { file = fd.file, type = "file_header",
-                                 file_idx = fi, is_viewed = false }
-      table.insert(file_header_lnums, header_lnum)
-
-      local fold_start = #lines + 1
-
-      -- Separator
-      table.insert(lines, SEP)
-      line_map[#lines] = { file = fd.file, type = "separator", file_idx = fi }
-
-      -- Binary or hunks
-      if fd.status == "binary" then
-        table.insert(lines, " (binary file – diff not available)")
-        line_map[#lines] = { file = fd.file, type = "binary_note", file_idx = fi }
-      else
-        for hi, hunk in ipairs(fd.hunks) do
-          table.insert(lines, hunk.header)
-          local hh_lnum = #lines
-          line_map[hh_lnum] = { file = fd.file, type = "hunk_header",
-                                 hunk_idx = hi, file_idx = fi }
-          table.insert(hunk_header_lnums, hh_lnum)
-
-          for _, dl in ipairs(hunk.lines) do
-            table.insert(lines, dl.text)
-            local lnum = #lines
-            line_map[lnum] = {
-              file     = fd.file,
-              type     = dl.type,
-              old_line = dl.old_line,
-              new_line = dl.new_line,
-              hunk_idx = hi,
-              file_idx = fi,
-            }
-          end
-
-          if hi < #fd.hunks then
-            table.insert(lines, "")
-            line_map[#lines] = { file = fd.file, type = "blank", file_idx = fi }
-          end
-        end
+    -- "Done for now" banner when everything non-snoozed is handled
+    local all_handled = true
+    for _, fd in ipairs(file_diffs) do
+      local m = file_moods[fd.file]
+      if m ~= "reviewed" and m ~= "snoozed" and m ~= "generated" then
+        all_handled = false
+        break
       end
-
-      local fold_stop = #lines
-      if fold_start <= fold_stop then
-        table.insert(fold_ranges, {
-          start     = fold_start,
-          stop      = fold_stop,
-          file      = fd.file,
-          file_idx  = fi,
-          is_viewed = false,
-        })
+    end
+    if all_handled and #file_diffs > 0 then
+      local snoozed_n = 0
+      for _, fd in ipairs(file_diffs) do
+        if viewed_state.is_snoozed(fd.file) then snoozed_n = snoozed_n + 1 end
       end
-
+      local done_text = "  ✦  all caught up — " .. reviewed_count .. " reviewed"
+      if snoozed_n > 0 then done_text = done_text .. ", " .. snoozed_n .. " snoozed" end
       table.insert(lines, "")
       line_map[#lines] = { type = "gap" }
-
-      ::continue::
+      table.insert(lines, done_text)
+      line_map[#lines] = { type = "done_summary" }
     end
   end
 
-  -- Write buffer
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(buf, "modifiable", false)
@@ -363,114 +519,224 @@ local function render(file_diffs, review_items, vst)
   return line_map, fold_ranges, file_header_lnums, hunk_header_lnums
 end
 
--- Apply line-level highlight groups.
+-- ── Decorations ───────────────────────────────────────────────────────────────
+
 local function apply_highlights(line_map)
   local buf = state.buf
   local n   = ensure_ns()
   vim.api.nvim_buf_clear_namespace(buf, n, 0, -1)
 
   for lnum, meta in pairs(line_map) do
-    local l0 = lnum - 1   -- 0-indexed for API calls
-    if meta.type == "progress" then
+    local l0 = lnum - 1
+    local t  = meta.type
+
+    if t == "progress" then
       local hl = "LocoProgressBar"
-      if state.timer_end and (state.timer_end - os.time()) > 0 and (state.timer_end - os.time()) <= 120 then
-        hl = "LocoTimerWarn"
+      if state.timer_end then
+        local rem = state.timer_end - os.time()
+        if rem > 0 and rem <= 120 then hl = "LocoTimerWarn" end
       end
       vim.api.nvim_buf_add_highlight(buf, n, hl, l0, 0, -1)
-    elseif meta.type == "section_header" then
+
+    elseif t == "section_header" then
       vim.api.nvim_buf_add_highlight(buf, n, "LocoSectionHeader", l0, 0, -1)
-    elseif meta.type == "section_divider" then
-      vim.api.nvim_buf_add_highlight(buf, n, "LocoSectionDivider", l0, 0, -1)
-    elseif meta.type == "file_header" then
-      local hl = meta.is_viewed and "LocoFileViewed" or "LocoFileHeader"
-      vim.api.nvim_buf_add_highlight(buf, n, hl, l0, 0, -1)
-    elseif meta.type == "separator" then
+
+    elseif t == "file_header" then
+      local base_hl = (meta.mood == "reviewed") and "LocoFileViewed" or "LocoFileHeader"
+      vim.api.nvim_buf_add_highlight(buf, n, base_hl, l0, 0, -1)
+
+      -- Mood dot colour (cols 2–4, 3 bytes)
+      vim.api.nvim_buf_set_extmark(buf, n, l0, meta.dot_col or 2, {
+        end_col  = (meta.dot_col or 2) + (meta.dot_len or 3),
+        hl_group = MOOD_HL[meta.mood] or "LocoMoodUntouched",
+        priority = 170,
+      })
+
+      -- Dim directory prefix
+      if meta.dir_len and meta.dir_len > 0 and meta.path_col then
+        vim.api.nvim_buf_set_extmark(buf, n, l0, meta.path_col, {
+          end_col  = meta.path_col + meta.dir_len,
+          hl_group = "LocoFileDir",
+          priority = 160,
+        })
+      end
+
+      -- Dim status pill
+      if meta.status_col and meta.status_len and meta.status_len > 0 then
+        vim.api.nvim_buf_set_extmark(buf, n, l0, meta.status_col, {
+          end_col  = meta.status_col + meta.status_len,
+          hl_group = "LocoStatsDim",
+          priority = 160,
+        })
+      end
+
+      -- Right-aligned diff stats
+      if meta.fd then
+        local stats = string.format("+%d  -%d", meta.fd.stats.added, meta.fd.stats.removed)
+        vim.api.nvim_buf_set_extmark(buf, n, l0, 0, {
+          virt_text     = { { stats, "LocoStatsDim" } },
+          virt_text_pos = "right_align",
+          priority      = 100,
+        })
+      end
+
+    elseif t == "separator" then
       vim.api.nvim_buf_add_highlight(buf, n, "LocoDiffSep", l0, 0, -1)
-    elseif meta.type == "hunk_header" then
+
+    elseif t == "hunk_header" then
       vim.api.nvim_buf_add_highlight(buf, n, "LocoHunkHeader", l0, 0, -1)
-    elseif meta.type == "add" then
+
+    elseif t == "add" then
       vim.api.nvim_buf_add_highlight(buf, n, "DiffAdd", l0, 0, -1)
-    elseif meta.type == "remove" then
+
+    elseif t == "remove" then
       vim.api.nvim_buf_add_highlight(buf, n, "DiffDelete", l0, 0, -1)
-    elseif meta.type == "binary_note" then
+
+    elseif t == "binary_note" then
       vim.api.nvim_buf_add_highlight(buf, n, "LocoBinaryNote", l0, 0, -1)
+
+    elseif t == "done_summary" then
+      vim.api.nvim_buf_add_highlight(buf, n, "LocoSuccess", l0, 0, -1)
     end
   end
 end
 
--- Overlay comment badges as virtual text on relevant diff lines.
 local function apply_comment_badges(line_map, comment_map)
   local buf = state.buf
   local n   = ensure_ns()
 
+  -- Inline diff line badges
   for lnum, meta in pairs(line_map) do
-    if meta.file and (meta.type == "add" or meta.type == "context") then
-      if meta.new_line then
-        local file_comments = comment_map[meta.file]
-        local items = file_comments and file_comments.new and file_comments.new[meta.new_line]
-        if items and #items > 0 then
-          local badges = {}
-          for _, item in ipairs(items) do
-            local preview = item.issue:sub(1, 45)
-            if #item.issue > 45 then preview = preview .. "…" end
-            table.insert(badges, item.id .. ": " .. preview)
-          end
-          vim.api.nvim_buf_set_extmark(buf, n, lnum - 1, 0, {
-            virt_text     = { { "  💬 " .. table.concat(badges, " | "), "LocoComment" } },
-            virt_text_pos = "eol",
-          })
-        end
+    local items = nil
+    if meta.file and (meta.type == "add" or meta.type == "context") and meta.new_line then
+      local fc = comment_map[meta.file]
+      items = fc and fc.new and fc.new[meta.new_line]
+    elseif meta.file and meta.type == "remove" and meta.old_line then
+      local fc = comment_map[meta.file]
+      items = fc and fc.old and fc.old[meta.old_line]
+    end
+
+    if items and #items > 0 then
+      local is_old = meta.type == "remove"
+      local badges = {}
+      for _, item in ipairs(items) do
+        local preview = item.issue:sub(1, 45)
+        if #item.issue > 45 then preview = preview .. "…" end
+        table.insert(badges, item.id .. ": " .. preview)
       end
-    elseif meta.file and meta.type == "remove" then
-      if meta.old_line then
-        local file_comments = comment_map[meta.file]
-        local items = file_comments and file_comments.old and file_comments.old[meta.old_line]
-        if items and #items > 0 then
-          local badges = {}
-          for _, item in ipairs(items) do
-            local preview = item.issue:sub(1, 45)
-            if #item.issue > 45 then preview = preview .. "…" end
-            table.insert(badges, item.id .. ": " .. preview)
-          end
-          vim.api.nvim_buf_set_extmark(buf, n, lnum - 1, 0, {
-            virt_text     = { { "  💬 " .. table.concat(badges, " | "), "LocoCommentOld" } },
-            virt_text_pos = "eol",
-          })
-        end
-      end
+      vim.api.nvim_buf_set_extmark(buf, n, lnum - 1, 0, {
+        virt_text     = { { "  💬 " .. table.concat(badges, " | "),
+                           is_old and "LocoCommentOld" or "LocoComment" } },
+        virt_text_pos = "eol",
+      })
     end
   end
 
-  -- Add comment count badge to file header lines (always visible above folds)
+  -- Comment count chip on file header lines
   for _, header_lnum in ipairs(state.file_header_lnums) do
     local header_meta = state.line_map[header_lnum]
     if header_meta and header_meta.file then
-      local fc = comment_map[header_meta.file]
-      if fc then
-        local count = 0
-        for _, bucket in pairs(fc) do       -- iterates fc.new and fc.old
-          for _, items in pairs(bucket) do
-            count = count + #items
-          end
-        end
-        if count > 0 then
-          vim.api.nvim_buf_set_extmark(buf, n, header_lnum - 1, 0, {
-            virt_text = { { "  💬 " .. count, "LocoComment" } },
-            virt_text_pos = "eol",
-          })
-        end
+      local count = comment_count_for(header_meta.file, comment_map)
+      if count > 0 then
+        vim.api.nvim_buf_set_extmark(buf, n, header_lnum - 1, 0, {
+          virt_text     = { { "  💬 " .. count, "LocoCommentChip" } },
+          virt_text_pos = "eol",
+          priority      = 90,
+        })
       end
     end
   end
 end
 
--- Create manual folds in the given window and collapse viewed-file sections.
+local function apply_heat_map(comment_map)
+  local heat_ns = state.heat_ns or vim.api.nvim_create_namespace("locoreview_pr_heat")
+  state.heat_ns = heat_ns
+  vim.api.nvim_buf_clear_namespace(state.buf, heat_ns, 0, -1)
+
+  for _, lnum in ipairs(state.file_header_lnums) do
+    local file = state.line_map[lnum] and state.line_map[lnum].file
+    if file then
+      local count = comment_count_for(file, comment_map)
+      if count > 0 then
+        local hl = count >= 3 and "LocoHeatHigh" or "LocoHeatLow"
+        vim.api.nvim_buf_set_extmark(state.buf, heat_ns, lnum - 1, 0, {
+          sign_text     = "▌",
+          sign_hl_group = hl,
+        })
+      end
+    end
+  end
+end
+
+-- Hunk spotlight: subtle tint on active hunk, dim other hunks in same file.
+local function apply_hunk_spotlight(active_hunk_lnum)
+  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then return end
+
+  local spot_ns = state.hunk_spot_ns or vim.api.nvim_create_namespace("locoreview_pr_spot")
+  state.hunk_spot_ns = spot_ns
+
+  local hdim_ns = vim.api.nvim_create_namespace("locoreview_pr_hdim2")
+
+  vim.api.nvim_buf_clear_namespace(state.buf, spot_ns, 0, -1)
+  vim.api.nvim_buf_clear_namespace(state.buf, hdim_ns, 0, -1)
+
+  if not active_hunk_lnum then return end
+
+  local active_meta = state.line_map[active_hunk_lnum]
+  if not active_meta then return end
+
+  local a_hunk = active_meta.hunk_idx
+  local a_file = active_meta.file_idx
+
+  -- Gutter mark on hunk header
+  vim.api.nvim_buf_set_extmark(state.buf, spot_ns, active_hunk_lnum - 1, 0, {
+    sign_text     = "▌",
+    sign_hl_group = "LocoHunkGutter",
+  })
+
+  -- Subtle tint on all lines of active hunk; dim other hunks in same file
+  for lnum, meta in pairs(state.line_map) do
+    if meta.file_idx == a_file and meta.hunk_idx then
+      if meta.hunk_idx == a_hunk then
+        vim.api.nvim_buf_set_extmark(state.buf, spot_ns, lnum - 1, 0, {
+          line_hl_group = "LocoHunkActive",
+          priority      = 50,
+        })
+      else
+        vim.api.nvim_buf_set_extmark(state.buf, hdim_ns, lnum - 1, 0, {
+          hl_group = "LocoHunkDim",
+          priority = 55,
+        })
+      end
+    end
+  end
+end
+
+-- Active-file background tint on the file header line.
+local function apply_active_file_tint(active_file)
+  local tint_ns = state.tint_ns or vim.api.nvim_create_namespace("locoreview_pr_tint")
+  state.tint_ns = tint_ns
+  vim.api.nvim_buf_clear_namespace(state.buf, tint_ns, 0, -1)
+  if not active_file then return end
+
+  for lnum, meta in pairs(state.line_map) do
+    if meta.type == "file_header" and meta.file == active_file then
+      vim.api.nvim_buf_set_extmark(state.buf, tint_ns, lnum - 1, 0, {
+        line_hl_group = "LocoFileActive",
+        priority      = 40,
+      })
+    end
+  end
+end
+
+-- ── Folds ─────────────────────────────────────────────────────────────────────
+
 local function setup_folds(win, fold_ranges)
   vim.api.nvim_win_call(win, function()
     vim.cmd("setlocal foldmethod=manual")
     vim.cmd("setlocal foldtext=v:lua._locoreview_pr_foldtext()")
     vim.cmd("setlocal foldlevel=99")
-    vim.cmd("normal! zE")   -- delete all existing folds
+    vim.cmd("normal! zE")
     for _, fr in ipairs(fold_ranges) do
       if fr.start <= fr.stop then
         vim.cmd(string.format("%d,%dfold", fr.start, fr.stop))
@@ -484,24 +750,21 @@ local function setup_folds(win, fold_ranges)
   end)
 end
 
--- ── Window helpers ──────────────────────────────────────────────────────────
+-- ── Window helpers ────────────────────────────────────────────────────────────
 
 local function is_alive()
-  return state.tabpage ~= nil
-    and vim.api.nvim_tabpage_is_valid(state.tabpage)
+  return state.tabpage ~= nil and vim.api.nvim_tabpage_is_valid(state.tabpage)
 end
 
 local function get_win()
   if not is_alive() then return nil end
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(state.tabpage)) do
-    if vim.api.nvim_win_get_buf(win) == state.buf then
-      return win
-    end
+    if vim.api.nvim_win_get_buf(win) == state.buf then return win end
   end
   return nil
 end
 
--- ── Keymaps ─────────────────────────────────────────────────────────────────
+-- ── Cursor / meta helpers ─────────────────────────────────────────────────────
 
 local function meta_at_cursor()
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
@@ -522,8 +785,27 @@ local function fold_range_for(file)
   return nil
 end
 
+local function hunk_header_lnum_at_lnum(lnum)
+  local meta = state.line_map[lnum]
+  if not meta or not meta.hunk_idx or not meta.file_idx then return nil end
+  for i = #state.hunk_header_lnums, 1, -1 do
+    local h  = state.hunk_header_lnums[i]
+    local hm = state.line_map[h]
+    if hm and hm.hunk_idx == meta.hunk_idx and hm.file_idx == meta.file_idx then
+      return h
+    end
+  end
+  return nil
+end
+
+local function hunk_header_lnum_at_cursor()
+  return hunk_header_lnum_at_lnum(vim.api.nvim_win_get_cursor(0)[1])
+end
+
+-- ── Navigation ────────────────────────────────────────────────────────────────
+
 local function navigate_files(direction)
-  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local lnum    = vim.api.nvim_win_get_cursor(0)[1]
   local headers = state.file_header_lnums
   if direction > 0 then
     for _, hl in ipairs(headers) do
@@ -543,7 +825,7 @@ local function navigate_files(direction)
 end
 
 local function navigate_hunks(direction)
-  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local lnum  = vim.api.nvim_win_get_cursor(0)[1]
   local hunks = state.hunk_header_lnums
   if direction > 0 then
     for _, hl in ipairs(hunks) do
@@ -562,258 +844,184 @@ local function navigate_hunks(direction)
   end
 end
 
+-- ── Sticky header float ───────────────────────────────────────────────────────
+
 local function update_sticky_header()
-  if not state.sticky_win or not vim.api.nvim_win_is_valid(state.sticky_win) then
-    return
-  end
-
+  if not state.sticky_win or not vim.api.nvim_win_is_valid(state.sticky_win) then return end
   local win = get_win()
-  if not win then
-    return
-  end
+  if not win then return end
 
-  -- Get the top visible line
-  local top_visible_line = vim.api.nvim_win_call(win, function()
-    return vim.fn.line("w0")
-  end)
+  local top = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
 
-  -- Find the enclosing file header by walking file_header_lnums backwards
   local header_lnum = nil
   for i = #state.file_header_lnums, 1, -1 do
-    if state.file_header_lnums[i] <= top_visible_line then
+    if state.file_header_lnums[i] <= top then
       header_lnum = state.file_header_lnums[i]
       break
     end
   end
 
-  -- Make sticky buffer modifiable to write to it
   vim.api.nvim_buf_set_option(state.sticky_buf, "modifiable", true)
-
-  if not header_lnum or header_lnum == top_visible_line then
-    -- Hide the sticky header if no enclosing header or real header is visible
-    vim.api.nvim_buf_set_lines(state.sticky_buf, 0, -1, false, {""})
+  if not header_lnum or header_lnum == top then
+    vim.api.nvim_buf_set_lines(state.sticky_buf, 0, -1, false, { "" })
   else
-    -- Read the actual header text from the buffer
-    local header_text = vim.api.nvim_buf_get_lines(state.buf, header_lnum - 1, header_lnum, false)[1]
-    vim.api.nvim_buf_set_lines(state.sticky_buf, 0, -1, false, {header_text or ""})
-
-    -- Apply the same highlight as the real header
-    local header_meta = state.line_map[header_lnum]
-    local hl = (header_meta and header_meta.is_viewed) and "LocoFileViewed" or "LocoFileHeader"
+    local text = vim.api.nvim_buf_get_lines(state.buf, header_lnum - 1, header_lnum, false)[1]
+    vim.api.nvim_buf_set_lines(state.sticky_buf, 0, -1, false, { text or "" })
+    local meta = state.line_map[header_lnum]
+    local hl   = (meta and meta.mood == "reviewed") and "LocoFileViewed" or "LocoFileHeader"
     vim.api.nvim_buf_add_highlight(state.sticky_buf, ensure_ns(), hl, 0, 0, -1)
   end
-
   vim.api.nvim_buf_set_option(state.sticky_buf, "modifiable", false)
 end
 
 local function create_sticky_header(win)
-  if state.sticky_win and vim.api.nvim_win_is_valid(state.sticky_win) then
-    return  -- Already exists
-  end
-
-  -- Create scratch buffer for the sticky header
+  if state.sticky_win and vim.api.nvim_win_is_valid(state.sticky_win) then return end
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(buf, "buftype",  "nofile")
   vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
 
-  -- Get window width
-  local win_width = vim.api.nvim_win_get_width(win)
-
-  -- Open float window at top of PR view window
   local float_win = vim.api.nvim_open_win(buf, false, {
-    relative = "win",
-    win = win,
-    row = 0,
-    col = 0,
-    width = win_width,
-    height = 1,
+    relative  = "win",
+    win       = win,
+    row       = 0, col = 0,
+    width     = vim.api.nvim_win_get_width(win),
+    height    = 1,
     focusable = false,
-    style = "minimal",
-    zindex = 50,
+    style     = "minimal",
+    zindex    = 50,
   })
-
   state.sticky_win = float_win
   state.sticky_buf = buf
-
-  -- Register WinScrolled autocmd
   state.sticky_autocmd = vim.api.nvim_create_autocmd("WinScrolled", {
-    callback = function()
-      update_sticky_header()
-    end,
+    callback = function() update_sticky_header() end,
   })
 end
+
+-- ── Action hint bar ───────────────────────────────────────────────────────────
+
+local HINT_CONTEXTS = {
+  file_header = "  v reviewed   s snooze   <CR> expand   go open   <leader>a actions   ? help",
+  hunk_header = "  c comment   zC collapse   ]c next hunk   v reviewed   s snooze",
+  diff        = "  c comment   C quick note   K show note   v reviewed   ]f next file",
+  default     = "  ]f/[f files   ]c/[c hunks   <leader>F rhythm   R refresh   q close",
+}
+
+local function hint_text_for(meta)
+  if not meta then return HINT_CONTEXTS.default end
+  local t = meta.type
+  if t == "file_header" then return HINT_CONTEXTS.file_header
+  elseif t == "hunk_header" then return HINT_CONTEXTS.hunk_header
+  elseif t == "add" or t == "remove" or t == "context" then return HINT_CONTEXTS.diff
+  else return HINT_CONTEXTS.default
+  end
+end
+
+local function update_hint_bar(meta)
+  if not state.hint_win or not vim.api.nvim_win_is_valid(state.hint_win) then return end
+  local text = hint_text_for(meta)
+  vim.api.nvim_buf_set_option(state.hint_buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(state.hint_buf, 0, -1, false, { text })
+  vim.api.nvim_buf_set_option(state.hint_buf, "modifiable", false)
+end
+
+local function create_hint_bar(win)
+  if not (config.get().pr_view and config.get().pr_view.action_hints ~= false) then return end
+  if state.hint_win and vim.api.nvim_win_is_valid(state.hint_win) then return end
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_option(buf, "buftype",  "nofile")
+  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+
+  local win_height = vim.api.nvim_win_get_height(win)
+  local win_width  = vim.api.nvim_win_get_width(win)
+
+  local hint_win = vim.api.nvim_open_win(buf, false, {
+    relative  = "win",
+    win       = win,
+    row       = win_height - 1,
+    col       = 0,
+    width     = win_width,
+    height    = 1,
+    focusable = false,
+    style     = "minimal",
+    zindex    = 49,
+  })
+
+  vim.api.nvim_win_set_option(hint_win, "winhl", "Normal:StatusLine")
+
+  state.hint_win = hint_win
+  state.hint_buf = buf
+
+  update_hint_bar(nil)
+end
+
+-- ── Hunk context collapse ─────────────────────────────────────────────────────
 
 local function get_context_lnums_for_hunk(hunk_header_lnum)
   local meta = state.line_map[hunk_header_lnum]
   if not meta then return {} end
-  local target_hunk_idx = meta.hunk_idx
-  local target_file_idx = meta.file_idx
-
-  local context_lnums = {}
-  for lnum, line_meta in pairs(state.line_map) do
-    if line_meta.hunk_idx == target_hunk_idx
-        and line_meta.file_idx == target_file_idx
-        and line_meta.type == "context" then
-      table.insert(context_lnums, lnum)
+  local lnums = {}
+  for lnum, lm in pairs(state.line_map) do
+    if lm.hunk_idx == meta.hunk_idx
+        and lm.file_idx == meta.file_idx
+        and lm.type == "context" then
+      table.insert(lnums, lnum)
     end
   end
-  table.sort(context_lnums)
-  return context_lnums
+  table.sort(lnums)
+  return lnums
 end
 
 local function collapse_hunk_context(hunk_header_lnum)
-  if state.hunk_ctx_marks[hunk_header_lnum] then
-    return  -- Already collapsed
+  if state.hunk_ctx_marks[hunk_header_lnum] then return end
+  local lnums = get_context_lnums_for_hunk(hunk_header_lnum)
+  if #lnums == 0 then return end
+
+  local ctx_ns = state.hunk_ctx_ns or vim.api.nvim_create_namespace("locoreview_pr_ctx")
+  state.hunk_ctx_ns = ctx_ns
+
+  local ids = {}
+  for _, lnum in ipairs(lnums) do
+    local id = vim.api.nvim_buf_set_extmark(state.buf, ctx_ns, lnum - 1, 0, { conceal = " " })
+    table.insert(ids, id)
   end
-
-  local context_lnums = get_context_lnums_for_hunk(hunk_header_lnum)
-  if #context_lnums == 0 then
-    return
-  end
-
-  local hunk_ctx_ns = state.hunk_ctx_ns or vim.api.nvim_create_namespace("locoreview_pr_ctx")
-  state.hunk_ctx_ns = hunk_ctx_ns
-
-  local mark_ids = {}
-
-  -- Hide all context lines with conceal
-  for _, lnum in ipairs(context_lnums) do
-    local id = vim.api.nvim_buf_set_extmark(state.buf, hunk_ctx_ns, lnum - 1, 0, {
-      conceal = " ",
-    })
-    table.insert(mark_ids, id)
-  end
-
-  -- Show virtual line after the last context line with a count
-  local last_context_lnum = context_lnums[#context_lnums]
-  local virtual_text = "  [· " .. #context_lnums .. " context lines ·]"
-  local id = vim.api.nvim_buf_set_extmark(state.buf, hunk_ctx_ns, last_context_lnum - 1, 0, {
-    virt_lines = { { virtual_text, "Comment" } },
+  local last = lnums[#lnums]
+  local id2 = vim.api.nvim_buf_set_extmark(state.buf, ctx_ns, last - 1, 0, {
+    virt_lines = { { { "  [· " .. #lnums .. " context lines ·]", "Comment" } } },
   })
-  table.insert(mark_ids, id)
+  table.insert(ids, id2)
+  state.hunk_ctx_marks[hunk_header_lnum] = ids
 
-  state.hunk_ctx_marks[hunk_header_lnum] = mark_ids
-
-  -- Set conceallevel if this is the first collapse
-  if not state.buf then return end
   local win = get_win()
-  if win then
-    vim.api.nvim_win_set_option(win, "conceallevel", 2)
-  end
+  if win then vim.api.nvim_win_set_option(win, "conceallevel", 2) end
 end
 
 local function expand_hunk_context(hunk_header_lnum)
   local ids = state.hunk_ctx_marks[hunk_header_lnum]
-  if not ids then
-    return
-  end
-
+  if not ids then return end
   for _, id in ipairs(ids) do
     if state.hunk_ctx_ns then
       pcall(vim.api.nvim_buf_del_extmark, state.buf, state.hunk_ctx_ns, id)
     end
   end
-
   state.hunk_ctx_marks[hunk_header_lnum] = nil
-
-  -- Reset conceallevel if no more collapses
   if not next(state.hunk_ctx_marks) then
     local win = get_win()
-    if win then
-      vim.api.nvim_win_set_option(win, "conceallevel", 0)
-    end
+    if win then vim.api.nvim_win_set_option(win, "conceallevel", 0) end
   end
 end
 
-local function hunk_header_lnum_at_cursor()
-  local lnum = vim.api.nvim_win_get_cursor(0)[1]
-  local meta = state.line_map[lnum]
-  if not meta then return nil end
-
-  local target_hunk_idx = meta.hunk_idx
-  local target_file_idx = meta.file_idx
-  if not target_hunk_idx or not target_file_idx then return nil end
-
-  -- Walk backwards to find the hunk header
-  for i = #state.hunk_header_lnums, 1, -1 do
-    local header_lnum = state.hunk_header_lnums[i]
-    local header_meta = state.line_map[header_lnum]
-    if header_meta and header_meta.hunk_idx == target_hunk_idx and header_meta.file_idx == target_file_idx then
-      return header_lnum
-    end
-  end
-
-  return nil
-end
-
-local function build_focus_queue()
-  local queue = {}
-  local vst = viewed_state.load()
-  local review_items = load_review_items()
-  local comment_map = build_comment_map(review_items)
-
-  -- Separate unviewed and viewed
-  local unviewed = {}
-  local viewed = {}
-
-  for _, fd in ipairs(state.file_diffs) do
-    local is_viewed = vst[fd.file] and vst[fd.file].viewed == true
-    local item = { file = fd.file, fd = fd, is_viewed = is_viewed }
-
-    -- Count comments
-    local comment_count = 0
-    if comment_map[fd.file] then
-      for _, bucket in pairs(comment_map[fd.file]) do
-        for _, items in pairs(bucket) do
-          comment_count = comment_count + #items
-        end
-      end
-    end
-    item.comment_count = comment_count
-
-    if is_viewed then
-      table.insert(viewed, item)
-    else
-      table.insert(unviewed, item)
-    end
-  end
-
-  -- Sort unviewed by size (descending) then by comment count
-  table.sort(unviewed, function(a, b)
-    local size_a = a.fd.stats.added + a.fd.stats.removed
-    local size_b = b.fd.stats.added + b.fd.stats.removed
-    if size_a ~= size_b then
-      return size_a > size_b
-    end
-    return a.comment_count > b.comment_count
-  end)
-
-  -- Sort viewed alphabetically
-  table.sort(viewed, function(a, b)
-    return a.file < b.file
-  end)
-
-  -- Combine: unviewed first, then viewed
-  for _, item in ipairs(unviewed) do
-    table.insert(queue, item.file)
-  end
-  for _, item in ipairs(viewed) do
-    table.insert(queue, item.file)
-  end
-
-  return queue
-end
+-- ── Rhythm mode (replaces focus modes) ───────────────────────────────────────
 
 local function apply_dim_layer(except_file)
   local dim_ns = state.dim_ns or vim.api.nvim_create_namespace("locoreview_pr_dim")
   state.dim_ns = dim_ns
-
-  -- Clear namespace
   vim.api.nvim_buf_clear_namespace(state.buf, dim_ns, 0, -1)
 
-  -- Dim all lines not in except_file
   for lnum, meta in pairs(state.line_map) do
-    if meta.file and meta.file ~= except_file and meta.type ~= "section_header" and meta.type ~= "progress" then
+    if meta.file and meta.file ~= except_file
+        and meta.type ~= "section_header"
+        and meta.type ~= "progress" then
       vim.api.nvim_buf_set_extmark(state.buf, dim_ns, lnum - 1, 0, {
         hl_group = "Comment",
         priority = 200,
@@ -822,290 +1030,208 @@ local function apply_dim_layer(except_file)
   end
 end
 
-local function apply_hunk_dim_layer(active_hunk_lnum)
-  local hunk_dim_ns = state.hunk_dim_ns or vim.api.nvim_create_namespace("locoreview_pr_hdim")
-  state.hunk_dim_ns = hunk_dim_ns
+local function apply_sweep_dim()
+  local dim_ns = state.dim_ns or vim.api.nvim_create_namespace("locoreview_pr_dim")
+  state.dim_ns = dim_ns
+  vim.api.nvim_buf_clear_namespace(state.buf, dim_ns, 0, -1)
 
-  -- Clear namespace
-  vim.api.nvim_buf_clear_namespace(state.buf, hunk_dim_ns, 0, -1)
-
-  -- Get active hunk's indices
-  local active_meta = state.line_map[active_hunk_lnum]
-  if not active_meta then return end
-
-  local active_hunk_idx = active_meta.hunk_idx
-  local active_file_idx = active_meta.file_idx
-
-  -- Dim all lines in same file but different hunk
+  local vst = viewed_state.load()
   for lnum, meta in pairs(state.line_map) do
-    if meta.file_idx == active_file_idx
-        and meta.hunk_idx
-        and meta.hunk_idx ~= active_hunk_idx
-        and meta.type ~= "section_header"
-        and meta.type ~= "progress" then
-      vim.api.nvim_buf_set_extmark(state.buf, hunk_dim_ns, lnum - 1, 0, {
-        hl_group = "Comment",
-        priority = 200,
-      })
-    end
-  end
-end
-
-local function update_focus_dim()
-  if state.focus_level == 0 then return end
-
-  local meta = meta_at_cursor()
-  local current_file = meta and meta.file
-
-  if current_file then
-    apply_dim_layer(current_file)
-    state.focus_file_idx = 1
-    for i, f in ipairs(state.focus_queue) do
-      if f == current_file then
-        state.focus_file_idx = i
-        break
-      end
-    end
-
-    if state.focus_level == 2 then
-      local hunk_lnum = hunk_header_lnum_at_cursor()
-      if hunk_lnum then
-        apply_hunk_dim_layer(hunk_lnum)
-      end
-    end
-  end
-end
-
-local function focus_advance_hunk()
-  if state.focus_level ~= 2 then
-    -- Not in focus mode; pass through <Space>
-    vim.api.nvim_feedkeys(" ", "n", false)
-    return
-  end
-
-  local current_lnum = vim.api.nvim_win_get_cursor(0)[1]
-
-  -- Find next hunk header after current position
-  local next_hunk_lnum = nil
-  for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
-    if hunk_lnum > current_lnum then
-      next_hunk_lnum = hunk_lnum
-      break
-    end
-  end
-
-  if not next_hunk_lnum then
-    return  -- No next hunk
-  end
-
-  -- Check if next hunk is in a different file
-  local next_meta = state.line_map[next_hunk_lnum]
-  local current_meta = state.line_map[current_lnum]
-  if next_meta and current_meta and next_meta.file_idx ~= current_meta.file_idx then
-    -- Find the new file in queue
-    for i, f in ipairs(state.focus_queue) do
-      if state.line_map[next_hunk_lnum].file == f then
-        state.focus_file_idx = i
-        break
-      end
-    end
-    apply_dim_layer(next_meta.file)
-  end
-
-  -- Move cursor to next hunk
-  vim.api.nvim_win_set_cursor(0, { next_hunk_lnum, 0 })
-  vim.cmd("normal! zz")
-
-  -- Apply hunk dim
-  apply_hunk_dim_layer(next_hunk_lnum)
-
-  -- Collapse all other hunks in the current file
-  local file_idx = next_meta.file_idx
-  for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
-    local hunk_meta = state.line_map[hunk_lnum]
-    if hunk_meta and hunk_meta.file_idx == file_idx and hunk_lnum ~= next_hunk_lnum then
-      collapse_hunk_context(hunk_lnum)
-    end
-  end
-end
-
-local function cycle_focus()
-  state.focus_level = (state.focus_level + 1) % 3
-
-  if state.focus_level == 0 then
-    -- Exit focus
-    if state.dim_ns then
-      vim.api.nvim_buf_clear_namespace(state.buf, state.dim_ns, 0, -1)
-    end
-    if state.hunk_dim_ns then
-      vim.api.nvim_buf_clear_namespace(state.buf, state.hunk_dim_ns, 0, -1)
-    end
-    if state.saved_ui.laststatus then
-      vim.o.laststatus = state.saved_ui.laststatus
-    end
-    if state.saved_ui.showtabline then
-      vim.o.showtabline = state.saved_ui.showtabline
-    end
-    state.focus_queue = {}
-    state.saved_ui = {}
-
-    -- Remove <Space> keymap if in level 2
-    local buf = state.buf
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-      pcall(vim.keymap.del, "n", "<Space>", { buffer = buf })
-    end
-
-    M.refresh()
-    vim.api.nvim_echo({ { "-- Focus: Off --", "ModeMsg" } }, false, {})
-  elseif state.focus_level == 1 then
-    -- Enter file focus
-    state.saved_ui.laststatus = vim.o.laststatus
-    state.saved_ui.showtabline = vim.o.showtabline
-    vim.o.laststatus = 0
-    vim.o.showtabline = 0
-
-    state.focus_queue = build_focus_queue()
-    state.focus_file_idx = 1
-    state.focus_hunk_idx = 1
-
-    if #state.focus_queue > 0 then
-      apply_dim_layer(state.focus_queue[1])
-    end
-
-    vim.api.nvim_echo({ { "-- Focus: File --", "ModeMsg" } }, false, {})
-  elseif state.focus_level == 2 then
-    -- Enter hunk focus (all of level 1, plus hunk dimming)
-    apply_hunk_dim_layer(vim.api.nvim_win_get_cursor(0)[1])
-
-    -- Add <Space> keymap for hunk advance
-    local buf = state.buf
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-      vim.keymap.set("n", "<Space>", focus_advance_hunk, { noremap = true, silent = true, buffer = buf })
-    end
-
-    vim.api.nvim_echo({ { "-- Focus: Hunk --", "ModeMsg" } }, false, {})
-  end
-end
-
-local function apply_heat_map(comment_map)
-  local heat_ns = state.heat_ns or vim.api.nvim_create_namespace("locoreview_pr_heat")
-  state.heat_ns = heat_ns
-
-  -- Clear namespace first
-  vim.api.nvim_buf_clear_namespace(state.buf, heat_ns, 0, -1)
-
-  -- Apply signs to each file header
-  for _, lnum in ipairs(state.file_header_lnums) do
-    local file = state.line_map[lnum].file
-    if file then
-      -- Count total comments for this file
-      local count = 0
-      if comment_map[file] then
-        for _, bucket in pairs(comment_map[file]) do
-          for _, items in pairs(bucket) do
-            count = count + #items
-          end
-        end
-      end
-
-      -- Place sign based on count
-      if count > 0 then
-        local hl = count >= 3 and "LocoHeatHigh" or "LocoHeatLow"
-        vim.api.nvim_buf_set_extmark(state.buf, heat_ns, lnum - 1, 0, {
-          sign_text = "▌",
-          sign_hl_group = hl,
+    if meta.file then
+      local mood = get_entry_mood(vst[meta.file])
+      if mood == "reviewed" and not viewed_state.is_snoozed(meta.file) then
+        vim.api.nvim_buf_set_extmark(state.buf, dim_ns, lnum - 1, 0, {
+          hl_group = "LocoSweepDim",
+          priority = 200,
         })
       end
     end
   end
 end
 
-local function open_file_picker()
-  -- Build entries
-  local entries = {}
-  local review_items = load_review_items()
-  local comment_map = build_comment_map(review_items)
+local function apply_rhythm_dims()
+  if state.rhythm_mode == "focus" then
+    local file = state.rhythm_queue[state.rhythm_file_idx]
+    if file then apply_dim_layer(file) end
+  elseif state.rhythm_mode == "sweep" then
+    apply_sweep_dim()
+  end
+end
 
+local function build_rhythm_queue()
+  local vst         = viewed_state.load()
+  local review_items = load_review_items()
+  local comment_map  = build_comment_map(review_items)
+
+  local priority = {
+    blocked     = 0,
+    risky       = 1,
+    in_progress = 2,
+    untouched   = 3,
+    generated   = 4,
+    snoozed     = 5,
+    reviewed    = 6,
+  }
+
+  local items = {}
   for _, fd in ipairs(state.file_diffs) do
-    local header_lnum = nil
-    for _, lnum in ipairs(state.file_header_lnums) do
-      if state.line_map[lnum].file == fd.file then
-        header_lnum = lnum
-        break
+    local mood = get_file_effective_mood(fd.file, vst, comment_map, fd)
+    table.insert(items, { file = fd.file, mood = mood, pri = priority[mood] or 99 })
+  end
+  table.sort(items, function(a, b) return a.pri < b.pri end)
+
+  local queue = {}
+  for _, item in ipairs(items) do
+    table.insert(queue, item.file)
+  end
+  return queue
+end
+
+local rhythm_advance   -- forward declaration
+
+rhythm_advance = function()
+  if state.rhythm_mode == "overview" then
+    vim.api.nvim_feedkeys(" ", "n", false)
+    return
+  end
+
+  local vst = viewed_state.load()
+
+  -- Build a list of files to advance through
+  local candidates = {}
+  for _, file in ipairs(state.rhythm_queue) do
+    local mood = get_entry_mood(vst[file])
+    if state.rhythm_mode == "focus" then
+      if not viewed_state.is_snoozed(file) then
+        table.insert(candidates, file)
+      end
+    else  -- sweep
+      if mood ~= "reviewed" and not viewed_state.is_snoozed(file) then
+        table.insert(candidates, file)
       end
     end
+  end
 
-    -- Check if viewed
-    local vst = viewed_state.load()
-    local is_viewed = vst[fd.file] and vst[fd.file].viewed == true
+  if #candidates == 0 then
+    ui.notify("all files handled", vim.log.levels.INFO)
+    return
+  end
 
-    -- Count comments
-    local comment_count = 0
-    if comment_map[fd.file] then
-      for _, bucket in pairs(comment_map[fd.file]) do
-        for _, items in pairs(bucket) do
-          comment_count = comment_count + #items
+  -- Find next candidate after current file
+  local current_file = state.rhythm_queue[state.rhythm_file_idx]
+  local next_file    = candidates[1]
+  local found_current = false
+  for _, f in ipairs(candidates) do
+    if found_current then next_file = f; break end
+    if f == current_file then found_current = true end
+  end
+
+  -- Find the header lnum for next_file
+  for _, lnum in ipairs(state.file_header_lnums) do
+    if state.line_map[lnum] and state.line_map[lnum].file == next_file then
+      -- Update queue index
+      for i, f in ipairs(state.rhythm_queue) do
+        if f == next_file then state.rhythm_file_idx = i; break end
+      end
+
+      vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+      vim.cmd("normal! zz")
+
+      if state.rhythm_mode == "focus" then
+        apply_dim_layer(next_file)
+      end
+      return
+    end
+  end
+end
+
+local function cycle_rhythm()
+  local modes = { "overview", "focus", "sweep" }
+  local cur_idx = 1
+  for i, m in ipairs(modes) do
+    if m == state.rhythm_mode then cur_idx = i; break end
+  end
+  local next_mode = modes[(cur_idx % #modes) + 1]
+  state.rhythm_mode = next_mode
+
+  -- Clear existing dims
+  if state.dim_ns and state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+    vim.api.nvim_buf_clear_namespace(state.buf, state.dim_ns, 0, -1)
+  end
+
+  local buf = state.buf
+
+  if next_mode == "overview" then
+    -- Restore UI chrome
+    if state.saved_ui.laststatus  then vim.o.laststatus  = state.saved_ui.laststatus  end
+    if state.saved_ui.showtabline then vim.o.showtabline = state.saved_ui.showtabline end
+    state.saved_ui  = {}
+    state.rhythm_queue = {}
+
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+      pcall(vim.keymap.del, "n", "<Space>", { buffer = buf })
+    end
+
+    M.refresh()
+    vim.api.nvim_echo({ { "  Rhythm: overview — scanning", "ModeMsg" } }, false, {})
+
+  elseif next_mode == "focus" then
+    state.saved_ui.laststatus  = vim.o.laststatus
+    state.saved_ui.showtabline = vim.o.showtabline
+    vim.o.laststatus  = 0
+    vim.o.showtabline = 0
+
+    state.rhythm_queue    = build_rhythm_queue()
+    state.rhythm_file_idx = 1
+
+    if #state.rhythm_queue > 0 then
+      local first = state.rhythm_queue[1]
+      apply_dim_layer(first)
+      for _, lnum in ipairs(state.file_header_lnums) do
+        if state.line_map[lnum] and state.line_map[lnum].file == first then
+          vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+          vim.cmd("normal! zz")
+          break
         end
       end
     end
 
-    -- Build display string
-    local status_icon = is_viewed and "✓" or "●"
-    local changes = "+" .. fd.stats.added .. " -" .. fd.stats.removed
-    local comment_str = comment_count > 0 and ("  " .. comment_count .. " comment(s)") or ""
-    local display = status_icon .. " " .. fd.file .. "  " .. changes .. "  [" .. fd.status .. "]" .. comment_str
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+      vim.keymap.set("n", "<Space>", rhythm_advance,
+        { noremap = true, silent = true, buffer = buf })
+    end
 
-    table.insert(entries, {
-      display = display,
-      file = fd.file,
-      is_viewed = is_viewed,
-      header_lnum = header_lnum,
-      ord = is_viewed and 1 or 0,  -- 0 for unviewed, 1 for viewed
-      index = #entries,
-    })
+    M.refresh()
+    vim.api.nvim_echo({ { "  Rhythm: focus — in flow  (<Space> next, s snooze)", "ModeMsg" } }, false, {})
+
+  elseif next_mode == "sweep" then
+    if state.saved_ui.laststatus  then vim.o.laststatus  = state.saved_ui.laststatus  end
+    if state.saved_ui.showtabline then vim.o.showtabline = state.saved_ui.showtabline end
+    state.saved_ui = {}
+
+    state.rhythm_queue    = build_rhythm_queue()
+    state.rhythm_file_idx = 1
+    apply_sweep_dim()
+
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+      vim.keymap.set("n", "<Space>", rhythm_advance,
+        { noremap = true, silent = true, buffer = buf })
+    end
+
+    M.refresh()
+    vim.api.nvim_echo({ { "  Rhythm: sweep — wrapping up  (<Space> next unreviewed)", "ModeMsg" } }, false, {})
   end
-
-  -- Sort: unviewed first, then viewed; within each group preserve order
-  table.sort(entries, function(a, b)
-    if a.ord ~= b.ord then
-      return a.ord < b.ord
-    end
-    return a.index < b.index
-  end)
-
-  -- Show picker
-  vim.ui.select(entries, {
-    prompt = "Jump to file:",
-    format_item = function(entry)
-      return entry.display
-    end,
-  }, function(choice)
-    if not choice or not choice.header_lnum then
-      return
-    end
-
-    -- Jump to file
-    local win = get_win()
-    if not win then return end
-
-    vim.api.nvim_win_set_cursor(win, { choice.header_lnum, 0 })
-
-    -- Open fold if file is collapsed (viewed files start collapsed)
-    if choice.is_viewed then
-      toggle_fold_at(choice.header_lnum)
-    end
-  end)
 end
+
+-- ── File picker ───────────────────────────────────────────────────────────────
 
 local function toggle_fold_at(lnum)
   local meta = state.line_map[lnum]
   if meta and meta.type == "file_header" then
-    -- Cursor is on the header (above the fold): move into the fold first
     local fr = fold_range_for(meta.file)
     if fr then
       vim.api.nvim_win_set_cursor(0, { fr.start, 0 })
       vim.cmd("normal! za")
-      -- Restore cursor to the header line
       vim.api.nvim_win_set_cursor(0, { lnum, 0 })
     end
   else
@@ -1113,7 +1239,62 @@ local function toggle_fold_at(lnum)
   end
 end
 
-local function mark_viewed_at_cursor()
+local function open_file_picker()
+  local review_items = load_review_items()
+  local comment_map  = build_comment_map(review_items)
+  local vst          = viewed_state.load()
+
+  local entries = {}
+  for _, fd in ipairs(state.file_diffs) do
+    local header_lnum = nil
+    for _, lnum in ipairs(state.file_header_lnums) do
+      if state.line_map[lnum] and state.line_map[lnum].file == fd.file then
+        header_lnum = lnum
+        break
+      end
+    end
+
+    local mood         = get_file_effective_mood(fd.file, vst, comment_map, fd)
+    local is_reviewed  = mood == "reviewed"
+    local dot          = MOOD_DOT[mood] or "○"
+    local count        = comment_count_for(fd.file, comment_map)
+    local comment_str  = count > 0 and ("  💬 " .. count) or ""
+    local snooze_str   = viewed_state.is_snoozed(fd.file) and "  ⏸" or ""
+    local display      = dot .. " " .. fd.file .. "  +" .. fd.stats.added .. " -" .. fd.stats.removed
+                         .. "  " .. (fd.status or "modified") .. comment_str .. snooze_str
+
+    table.insert(entries, {
+      display     = display,
+      file        = fd.file,
+      is_reviewed = is_reviewed,
+      header_lnum = header_lnum,
+      ord         = is_reviewed and 1 or 0,
+      index       = #entries,
+    })
+  end
+
+  table.sort(entries, function(a, b)
+    if a.ord ~= b.ord then return a.ord < b.ord end
+    return a.index < b.index
+  end)
+
+  vim.ui.select(entries, {
+    prompt      = "Jump to file:",
+    format_item = function(e) return e.display end,
+  }, function(choice)
+    if not choice or not choice.header_lnum then return end
+    local win = get_win()
+    if not win then return end
+    vim.api.nvim_win_set_cursor(win, { choice.header_lnum, 0 })
+    if choice.is_reviewed then
+      toggle_fold_at(choice.header_lnum)
+    end
+  end)
+end
+
+-- ── Review actions ────────────────────────────────────────────────────────────
+
+local function mark_reviewed_at_cursor()
   local meta = meta_at_cursor()
   if not meta or not meta.file then
     ui.notify("not on a diff line", vim.log.levels.WARN)
@@ -1121,52 +1302,45 @@ local function mark_viewed_at_cursor()
   end
 
   local file = meta.file
-  local diff_hash = diff_hash_for(file)
+  viewed_state.mark_reviewed(file, diff_hash_for(file))
 
-  viewed_state.mark_viewed(file, diff_hash)
-
-  -- Micro-rewards: show animation if in focus mode
-  if state.focus_level > 0 and config.get().pr_view.micro_rewards then
-    -- Find the file's header lnum
+  -- Micro-reward animation
+  if config.get().pr_view.micro_rewards then
     local header_lnum = nil
     for _, lnum in ipairs(state.file_header_lnums) do
-      if state.line_map[lnum].file == file then
+      if state.line_map[lnum] and state.line_map[lnum].file == file then
         header_lnum = lnum
         break
       end
     end
-
     if header_lnum then
       local n = ensure_ns()
       vim.api.nvim_buf_set_extmark(state.buf, n, header_lnum - 1, 0, {
-        virt_text = { { " ✓ ✓ ✓ done ✓ ✓ ✓", "DiagnosticSignOk" } },
+        virt_text     = { { "  ● reviewed ✦", "DiagnosticSignOk" } },
         virt_text_pos = "eol",
       })
     end
-
-    -- Defer refresh so animation is visible
-    vim.defer_fn(function()
-      M.refresh()
-    end, 300)
+    vim.defer_fn(function() M.refresh() end, 350)
   else
     M.refresh()
   end
 
-  -- Auto-advance to next unviewed file if enabled
   if config.get().pr_view.auto_advance_on_viewed then
-    -- Find the first unviewed file in file_header_lnums
+    local vst = viewed_state.load()
     for _, lnum in ipairs(state.file_header_lnums) do
-      local header_meta = state.line_map[lnum]
-      if header_meta and header_meta.is_viewed == false then
-        -- Jump to this file's first hunk
+      local hm = state.line_map[lnum]
+      if hm and hm.file and get_entry_mood(vst[hm.file]) ~= "reviewed"
+          and not viewed_state.is_snoozed(hm.file) then
         vim.api.nvim_win_set_cursor(0, { lnum, 0 })
         return
       end
     end
-    -- All files reviewed
-    ui.notify("All files reviewed!", vim.log.levels.INFO)
+    ui.notify("all files reviewed ✦", vim.log.levels.INFO)
   end
 end
+
+-- Backwards-compat name used in batch_mark_directory
+local mark_viewed_at_cursor = mark_reviewed_at_cursor
 
 local function mark_unviewed_at_cursor()
   local meta = meta_at_cursor()
@@ -1174,6 +1348,62 @@ local function mark_unviewed_at_cursor()
   viewed_state.mark_unviewed(meta.file)
   M.refresh()
 end
+
+local function snooze_file_at_cursor()
+  local meta = meta_at_cursor()
+  if not meta or not meta.file then
+    ui.notify("not on a file line", vim.log.levels.WARN)
+    return
+  end
+
+  local file = meta.file
+  if viewed_state.is_snoozed(file) then
+    viewed_state.unsnooze(file)
+    ui.notify("un-snoozed " .. file, vim.log.levels.INFO)
+  else
+    viewed_state.snooze(file)
+
+    -- Brief animation
+    if config.get().pr_view.micro_rewards then
+      local n = ensure_ns()
+      local header_lnum = nil
+      for _, lnum in ipairs(state.file_header_lnums) do
+        if state.line_map[lnum] and state.line_map[lnum].file == file then
+          header_lnum = lnum
+          break
+        end
+      end
+      if header_lnum then
+        vim.api.nvim_buf_set_extmark(state.buf, n, header_lnum - 1, 0, {
+          virt_text     = { { "  ⏸ snoozed", "LocoMoodSnoozed" } },
+          virt_text_pos = "eol",
+        })
+      end
+      vim.defer_fn(function() M.refresh() end, 350)
+    else
+      M.refresh()
+    end
+    ui.notify("snoozed " .. file .. " — skipped in rhythm", vim.log.levels.INFO)
+  end
+end
+
+local function jump_next_unreviewed()
+  local vst = viewed_state.load()
+  for _, lnum in ipairs(state.file_header_lnums) do
+    local hm = state.line_map[lnum]
+    if hm and hm.file then
+      local mood = get_entry_mood(vst[hm.file])
+      if mood ~= "reviewed" and not viewed_state.is_snoozed(hm.file) then
+        local win = get_win()
+        if win then vim.api.nvim_win_set_cursor(win, { lnum, 0 }) end
+        return
+      end
+    end
+  end
+  ui.notify("no unreviewed files remaining", vim.log.levels.INFO)
+end
+
+-- ── Comment actions ───────────────────────────────────────────────────────────
 
 local function add_comment_at_cursor()
   local meta = meta_at_cursor()
@@ -1184,21 +1414,16 @@ local function add_comment_at_cursor()
 
   local line, line_ref
   if meta.type == "remove" and meta.old_line then
-    line = meta.old_line
-    line_ref = "old"
+    line = meta.old_line; line_ref = "old"
   elseif (meta.type == "add" or meta.type == "context") and meta.new_line then
-    line = meta.new_line
-    line_ref = "new"
+    line = meta.new_line; line_ref = "new"
   else
     ui.notify("place cursor on an added, context, or removed line to comment", vim.log.levels.WARN)
     return
   end
 
-  -- Save cursor before UI prompts steal focus
   local win = get_win()
   if win then state.pending_cursor = vim.api.nvim_win_get_cursor(win) end
-
-  -- Delegate to the commands module so the full ReviewAdd flow runs.
   require("locoreview.commands").add_at(meta.file, line, nil, line_ref)
 end
 
@@ -1211,202 +1436,82 @@ local function add_quick_comment_at_cursor()
 
   local line, line_ref
   if meta.type == "remove" and meta.old_line then
-    line = meta.old_line
-    line_ref = "old"
+    line = meta.old_line; line_ref = "old"
   elseif (meta.type == "add" or meta.type == "context") and meta.new_line then
-    line = meta.new_line
-    line_ref = "new"
+    line = meta.new_line; line_ref = "new"
   else
     ui.notify("place cursor on an added, context, or removed line to comment", vim.log.levels.WARN)
     return
   end
 
-  -- Save cursor before UI prompts steal focus
   local win = get_win()
   if win then state.pending_cursor = vim.api.nvim_win_get_cursor(win) end
 
-  -- Prompt for issue text only
-  vim.ui.input(
-    { prompt = "Quick note: " },
-    function(text)
-      if not text or text:match("^%s*$") then
-        return
-      end
+  vim.ui.input({ prompt = "Quick note: " }, function(text)
+    if not text or text:match("^%s*$") then return end
 
-      local review_items = load_review_items()
-      local next_items, new_item = store.insert(review_items, {
-        file = meta.file,
-        line = line,
-        line_ref = line_ref,
-        severity = "low",
-        status = "open",
-        issue = text,
-        requested_change = "",
-      })
+    local items = load_review_items()
+    local next_items, new_item = store.insert(items, {
+      file             = meta.file,
+      line             = line,
+      line_ref         = line_ref,
+      severity         = "low",
+      status           = "open",
+      issue            = text,
+      requested_change = "",
+    })
 
-      if not next_items then
-        ui.notify("Failed to add comment", vim.log.levels.ERROR)
-        return
-      end
-
-      local path = fs.review_file_path()
-      if not path then
-        ui.notify("Unable to find review file", vim.log.levels.ERROR)
-        return
-      end
-
-      store.save(path, next_items)
-      M.refresh()
-      ui.notify("Added comment " .. new_item.id, vim.log.levels.INFO)
-    end
-  )
-end
-
-local function batch_mark_directory()
-  local meta = meta_at_cursor()
-  if not meta or not meta.file then
-    ui.notify("cursor not on a diff line", vim.log.levels.WARN)
-    return
-  end
-
-  -- Extract directory
-  local dir = vim.fn.fnamemodify(meta.file, ":h")
-  if dir == "." then
-    -- Root-level file; match files with no '/' in path
-    dir = ""
-  end
-
-  -- Collect files in this directory
-  local files_in_dir = {}
-  for _, fd in ipairs(state.file_diffs) do
-    local matches = false
-    if dir == "" then
-      -- Root-level: match files with no '/'
-      matches = not string.find(fd.file, "/")
-    else
-      -- Subdirectory: match files starting with "dir/"
-      matches = vim.startswith(fd.file, dir .. "/")
+    if not next_items then
+      ui.notify("failed to add comment", vim.log.levels.ERROR)
+      return
     end
 
-    if matches then
-      table.insert(files_in_dir, fd)
-    end
-  end
+    local path = fs.review_file_path()
+    if not path then ui.notify("unable to find review file", vim.log.levels.ERROR); return end
 
-  if #files_in_dir == 0 then
-    ui.notify("no files found in directory", vim.log.levels.WARN)
-    return
-  end
-
-  -- Confirm with user
-  vim.ui.select(
-    {"Yes", "No"},
-    { prompt = "Mark " .. #files_in_dir .. " files in " .. (dir ~= "" and dir or "/") .. "/ as viewed?" },
-    function(choice)
-      if choice == "Yes" then
-        -- Mark all files as viewed
-        for _, fd in ipairs(files_in_dir) do
-          viewed_state.mark_viewed(fd.file, fd.diff_hash)
-        end
-        -- Refresh and show notification
-        M.refresh()
-        ui.notify("Marked " .. #files_in_dir .. " files viewed", vim.log.levels.INFO)
-      end
-    end
-  )
-end
-
-local function start_or_manage_timer()
-  if state.timer ~= nil then
-    -- Timer already running; offer to cancel or continue
-    vim.ui.select(
-      {"Cancel timer", "Keep going"},
-      { prompt = "Timer is running" },
-      function(choice)
-        if choice == "Cancel timer" then
-          state.timer:stop()
-          state.timer:close()
-          state.timer = nil
-          state.timer_end = nil
-          M.refresh()
-        end
-      end
-    )
-  else
-    -- No timer running; prompt for duration
-    vim.ui.input(
-      { prompt = "Minutes: " },
-      function(input)
-        if not input or input:match("^%s*$") then
-          return
-        end
-        local minutes = tonumber(input)
-        if not minutes or minutes <= 0 then
-          ui.notify("Invalid input: please enter a positive number", vim.log.levels.WARN)
-          return
-        end
-
-        -- Set timer end time
-        state.timer_end = os.time() + (minutes * 60)
-
-        -- Create and start timer
-        state.timer = vim.loop.new_timer()
-        state.timer:start(0, 1000, vim.schedule_wrap(function()
-          M.refresh()
-        end))
-
-        -- Refresh immediately to show timer in progress line
-        M.refresh()
-
-        ui.notify("Timer started: " .. minutes .. " minutes", vim.log.levels.INFO)
-      end
-    )
-  end
+    store.save(path, next_items)
+    M.refresh()
+    ui.notify("added note " .. new_item.id, vim.log.levels.INFO)
+  end)
 end
 
 local function show_comment_popup()
   local meta = meta_at_cursor()
   if not meta or not meta.file then
-    ui.notify("No comment here", vim.log.levels.WARN)
+    ui.notify("no comment here", vim.log.levels.WARN)
     return
   end
 
   local review_items = load_review_items()
-  local comment_map = build_comment_map(review_items)
+  local comment_map  = build_comment_map(review_items)
+  local fc           = comment_map[meta.file]
+  local items        = nil
 
-  -- Look up the comment
-  local file_comments = comment_map[meta.file]
-  local items = nil
-  if file_comments then
+  if fc then
     if meta.type == "remove" and meta.old_line then
-      items = file_comments.old and file_comments.old[meta.old_line]
+      items = fc.old and fc.old[meta.old_line]
     elseif meta.new_line then
-      items = file_comments.new and file_comments.new[meta.new_line]
+      items = fc.new and fc.new[meta.new_line]
     end
   end
 
   if not items or #items == 0 then
-    ui.notify("No comment here", vim.log.levels.WARN)
+    ui.notify("no comment here", vim.log.levels.WARN)
     return
   end
 
-  local item = items[1]  -- Show first item for now
+  local item = items[1]
 
-  -- Build content for the float
   local lines = {
     "ID: " .. item.id,
     "Status: " .. item.status,
     "Severity: " .. item.severity,
     "",
+    "Issue:",
   }
-
-  -- Add issue (possibly multi-line)
-  table.insert(lines, "Issue:")
   for line in (item.issue .. "\n"):gmatch("([^\n]*)\n") do
     table.insert(lines, line)
   end
-
-  -- Add requested_change if present
   if item.requested_change and item.requested_change ~= "" then
     table.insert(lines, "")
     table.insert(lines, "Requested change:")
@@ -1414,98 +1519,74 @@ local function show_comment_popup()
       table.insert(lines, line)
     end
   end
-
   table.insert(lines, "")
   table.insert(lines, "[e] edit  [s] status  [d] delete  [q] close")
 
-  -- Calculate float dimensions
   local width = 0
-  for _, line in ipairs(lines) do
-    width = math.max(width, #line)
-  end
+  for _, line in ipairs(lines) do width = math.max(width, #line) end
   width = math.min(width + 4, vim.o.columns - 4)
-  local height = #lines
 
-  -- Create scratch buffer for float
   local float_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_option(float_buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(float_buf, "buftype",  "nofile")
   vim.api.nvim_buf_set_option(float_buf, "bufhidden", "wipe")
   vim.api.nvim_buf_set_option(float_buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(float_buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(float_buf, "modifiable", false)
 
-  -- Open float window
   local float_win = vim.api.nvim_open_win(float_buf, true, {
     relative = "cursor",
-    row = 1,
-    col = 0,
-    width = width,
-    height = height,
-    style = "minimal",
+    row = 1, col = 0,
+    width  = width,
+    height = #lines,
+    style  = "minimal",
     border = "rounded",
   })
 
-  -- Set up keymaps on float buffer
-  local float_opts = { noremap = true, silent = true, buffer = float_buf }
+  local fk = { noremap = true, silent = true, buffer = float_buf }
 
-  -- Close the float and optionally refresh
   local function close_float()
     if vim.api.nvim_win_is_valid(float_win) then
       vim.api.nvim_win_close(float_win, true)
     end
   end
 
-  -- e: Edit in review.md
   vim.keymap.set("n", "e", function()
     close_float()
     vim.cmd("edit " .. vim.fn.fnameescape(fs.review_file_path()))
     vim.fn.search("^## " .. item.id)
-  end, float_opts)
+  end, fk)
 
-  -- s: Cycle status
   vim.keymap.set("n", "s", function()
+    local types_mod = require("locoreview.types")
+    local transitions = types_mod.VALID_TRANSITIONS[item.status] or {}
     local next_status = nil
-    for status_name, _ in pairs(require("locoreview.types").VALID_TRANSITIONS[item.status] or {}) do
-      next_status = status_name
-      break
-    end
-
+    for s, _ in pairs(transitions) do next_status = s; break end
     if next_status then
-      local items_updated = require("locoreview.store").transition(review_items, item.id, next_status)
-      if items_updated then
-        require("locoreview.store").save(fs.review_file_path(), items_updated)
+      local updated = require("locoreview.store").transition(review_items, item.id, next_status)
+      if updated then
+        require("locoreview.store").save(fs.review_file_path(), updated)
         close_float()
         M.refresh()
       end
     end
-  end, float_opts)
+  end, fk)
 
-  -- d: Delete
   vim.keymap.set("n", "d", function()
-    vim.ui.select(
-      {"Delete", "Cancel"},
-      { prompt = "Delete this comment?" },
-      function(choice)
-        if choice == "Delete" then
-          local items_updated = require("locoreview.store").delete(review_items, item.id)
-          if items_updated then
-            require("locoreview.store").save(fs.review_file_path(), items_updated)
-            close_float()
-            M.refresh()
-          end
+    vim.ui.select({ "Delete", "Cancel" }, { prompt = "Delete this note?" }, function(choice)
+      if choice == "Delete" then
+        local updated = require("locoreview.store").delete(review_items, item.id)
+        if updated then
+          require("locoreview.store").save(fs.review_file_path(), updated)
+          close_float()
+          M.refresh()
         end
       end
-    )
-  end, float_opts)
+    end)
+  end, fk)
 
-  -- q and <Esc>: Close
-  local function close_handler()
-    close_float()
-  end
-  vim.keymap.set("n", "q", close_handler, float_opts)
-  vim.keymap.set("n", "<Esc>", close_handler, float_opts)
+  vim.keymap.set("n", "q",    close_float, fk)
+  vim.keymap.set("n", "<Esc>", close_float, fk)
 
-  -- Auto-close on cursor move
   local autocmd_id = vim.api.nvim_create_autocmd("CursorMoved", {
     buffer = state.buf,
     callback = function()
@@ -1515,6 +1596,90 @@ local function show_comment_popup()
       end
     end,
   })
+end
+
+-- ── Batch directory mark ──────────────────────────────────────────────────────
+
+local function batch_mark_directory()
+  local meta = meta_at_cursor()
+  if not meta or not meta.file then
+    ui.notify("cursor not on a diff line", vim.log.levels.WARN)
+    return
+  end
+
+  local dir = vim.fn.fnamemodify(meta.file, ":h")
+  if dir == "." then dir = "" end
+
+  local files_in_dir = {}
+  for _, fd in ipairs(state.file_diffs) do
+    local matches = (dir == "") and not string.find(fd.file, "/")
+                    or vim.startswith(fd.file, dir .. "/")
+    if matches then table.insert(files_in_dir, fd) end
+  end
+
+  if #files_in_dir == 0 then
+    ui.notify("no files found in directory", vim.log.levels.WARN)
+    return
+  end
+
+  vim.ui.select({ "Yes", "No" }, {
+    prompt = "Mark " .. #files_in_dir .. " files in "
+             .. (dir ~= "" and dir or "/") .. "/ as reviewed?",
+  }, function(choice)
+    if choice == "Yes" then
+      for _, fd in ipairs(files_in_dir) do
+        viewed_state.mark_reviewed(fd.file, fd.diff_hash)
+      end
+      M.refresh()
+      ui.notify("marked " .. #files_in_dir .. " files reviewed", vim.log.levels.INFO)
+    end
+  end)
+end
+
+-- ── Timer ─────────────────────────────────────────────────────────────────────
+
+local function start_or_manage_timer()
+  if state.timer ~= nil then
+    vim.ui.select({ "Cancel timer", "Keep going" }, { prompt = "Timer is running" },
+      function(choice)
+        if choice == "Cancel timer" then
+          state.timer:stop(); state.timer:close()
+          state.timer = nil; state.timer_end = nil
+          M.refresh()
+        end
+      end)
+  else
+    vim.ui.input({ prompt = "Minutes: " }, function(input)
+      if not input or input:match("^%s*$") then return end
+      local minutes = tonumber(input)
+      if not minutes or minutes <= 0 then
+        ui.notify("please enter a positive number", vim.log.levels.WARN)
+        return
+      end
+      state.timer_end = os.time() + (minutes * 60)
+      state.timer = vim.loop.new_timer()
+      state.timer:start(0, 1000, vim.schedule_wrap(function() M.refresh() end))
+      M.refresh()
+      ui.notify("timer started: " .. minutes .. " minutes", vim.log.levels.INFO)
+    end)
+  end
+end
+
+-- ── File / hunk actions ───────────────────────────────────────────────────────
+
+local function file_path_at_cursor()
+  local meta = meta_at_cursor()
+  if not meta or not meta.file then
+    ui.notify("cursor is not on a file line", vim.log.levels.WARN)
+    return nil
+  end
+  return meta.file
+end
+
+local function absolute_path_for(file)
+  local root = git.repo_root()
+  if not root or root == "" then return nil end
+  return root .. "/" .. file
 end
 
 local function open_source_at_cursor()
@@ -1530,39 +1695,27 @@ local function open_source_at_cursor()
   vim.api.nvim_win_set_cursor(0, { line, 0 })
 end
 
-local function file_path_at_cursor()
+local function open_in_split_at_cursor()
   local meta = meta_at_cursor()
   if not meta or not meta.file then
     ui.notify("cursor is not on a file line", vim.log.levels.WARN)
-    return nil
+    return
   end
-  return meta.file
-end
-
-local function absolute_path_for(file)
+  local line = meta.new_line or meta.old_line or 1
   local root = git.repo_root()
-  if not root or root == "" then
-    return nil
-  end
-  return root .. "/" .. file
+  pcall(vim.cmd, "tabprevious")
+  vim.cmd("vsplit " .. vim.fn.fnameescape(root .. "/" .. meta.file))
+  vim.api.nvim_win_set_cursor(0, { line, 0 })
 end
 
 local function delete_file_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-
   local path = absolute_path_for(file)
-  if not path then
-    ui.notify("could not determine repository root", vim.log.levels.ERROR)
-    return
-  end
+  if not path then ui.notify("could not determine repository root", vim.log.levels.ERROR); return end
 
   local rc = vim.fn.delete(path)
-  if rc ~= 0 then
-    ui.notify("failed to delete " .. file, vim.log.levels.ERROR)
-    return
-  end
-
+  if rc ~= 0 then ui.notify("failed to delete " .. file, vim.log.levels.ERROR); return end
   M.refresh()
   ui.notify("deleted " .. file, vim.log.levels.INFO)
 end
@@ -1570,26 +1723,14 @@ end
 local function rename_file_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-
   local old_path = absolute_path_for(file)
-  if not old_path then
-    ui.notify("could not determine repository root", vim.log.levels.ERROR)
-    return
-  end
-
+  if not old_path then ui.notify("could not determine repository root", vim.log.levels.ERROR); return end
   local root = git.repo_root()
-  vim.ui.input({
-    prompt = "Rename file to: ",
-    default = file,
-  }, function(input)
-    if not input then
-      return
-    end
-    local target = (input:gsub("^%s+", ""):gsub("%s+$", ""))
-    if target == "" or target == file then
-      return
-    end
 
+  vim.ui.input({ prompt = "Rename file to: ", default = file }, function(input)
+    if not input then return end
+    local target = (input:gsub("^%s+", ""):gsub("%s+$", ""))
+    if target == "" or target == file then return end
     if target:sub(1, 1) == "/" then
       if vim.startswith(target, root .. "/") then
         target = target:sub(#root + 2)
@@ -1598,43 +1739,29 @@ local function rename_file_at_cursor()
         return
       end
     end
-
     local new_path = absolute_path_for(target)
-    if not new_path then
-      ui.notify("could not determine repository root", vim.log.levels.ERROR)
-      return
-    end
-
+    if not new_path then ui.notify("could not determine repository root", vim.log.levels.ERROR); return end
     local dir = vim.fn.fnamemodify(new_path, ":h")
-    if dir and dir ~= "" then
-      vim.fn.mkdir(dir, "p")
-    end
-
-    local rc = vim.fn.rename(old_path, new_path)
-    if rc ~= 0 then
+    if dir and dir ~= "" then vim.fn.mkdir(dir, "p") end
+    if vim.fn.rename(old_path, new_path) ~= 0 then
       ui.notify("failed to rename " .. file, vim.log.levels.ERROR)
       return
     end
-
     M.refresh()
-    ui.notify("renamed " .. file .. " -> " .. target, vim.log.levels.INFO)
+    ui.notify("renamed " .. file .. " → " .. target, vim.log.levels.INFO)
   end)
 end
 
 local function copy_file_path_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-
   local copied = false
   for _, reg in ipairs({ "+", "*" }) do
     local ok = pcall(vim.fn.setreg, reg, file)
     copied = copied or ok
   end
-  if not copied then
-    pcall(vim.fn.setreg, "\"", file)
-  end
-
-  ui.notify("copied path: " .. file, vim.log.levels.INFO)
+  if not copied then pcall(vim.fn.setreg, '"', file) end
+  ui.notify("copied: " .. file, vim.log.levels.INFO)
 end
 
 local function view_file_diff_at_cursor()
@@ -1651,21 +1778,14 @@ local function view_file_diff_at_cursor()
   table.insert(cmd, file)
 
   local lines, err = run_system_list(cmd)
-  if not lines then
-    ui.notify("git diff failed: " .. (err or "unknown error"), vim.log.levels.ERROR)
-    return
-  end
-
-  if #lines == 0 then
-    ui.notify("no diff for " .. file, vim.log.levels.INFO)
-    return
-  end
+  if not lines then ui.notify("git diff failed: " .. (err or ""), vim.log.levels.ERROR); return end
+  if #lines == 0 then ui.notify("no diff for " .. file, vim.log.levels.INFO); return end
 
   vim.cmd("tabnew")
   local buf = vim.api.nvim_get_current_buf()
-  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(buf, "buftype",  "nofile")
   vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
-  vim.api.nvim_buf_set_option(buf, "swapfile", false)
+  vim.api.nvim_buf_set_option(buf, "swapfile",  false)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(buf, "modifiable", false)
   vim.api.nvim_buf_set_option(buf, "filetype", "diff")
@@ -1675,31 +1795,20 @@ end
 local function add_to_gitignore_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-
   local root = git.repo_root()
-  local gitignore_path = root .. "/.gitignore"
-  local f = io.open(gitignore_path, "a")
-  if not f then
-    ui.notify("failed to open .gitignore", vim.log.levels.ERROR)
-    return
-  end
+  local f = io.open(root .. "/.gitignore", "a")
+  if not f then ui.notify("failed to open .gitignore", vim.log.levels.ERROR); return end
   f:write(file .. "\n")
   f:close()
-
   ui.notify("added " .. file .. " to .gitignore", vim.log.levels.INFO)
 end
 
 local function remove_from_tracking_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-
   local root = git.repo_root()
   vim.fn.system({ "git", "-C", root, "rm", "--cached", "--", file })
-  if vim.v.shell_error ~= 0 then
-    ui.notify("git rm --cached failed", vim.log.levels.ERROR)
-    return
-  end
-
+  if vim.v.shell_error ~= 0 then ui.notify("git rm --cached failed", vim.log.levels.ERROR); return end
   M.refresh()
   ui.notify("removed " .. file .. " from tracking", vim.log.levels.INFO)
 end
@@ -1707,16 +1816,11 @@ end
 local function reset_file_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-
   local root = git.repo_root()
   vim.fn.system({ "git", "-C", root, "checkout", "--", file })
-  if vim.v.shell_error ~= 0 then
-    ui.notify("git checkout -- failed", vim.log.levels.ERROR)
-    return
-  end
-
+  if vim.v.shell_error ~= 0 then ui.notify("git checkout -- failed", vim.log.levels.ERROR); return end
   M.refresh()
-  ui.notify("reset " .. file, vim.log.levels.INFO)
+  ui.notify("reverted " .. file, vim.log.levels.INFO)
 end
 
 local function reset_hunk_at_cursor()
@@ -1725,173 +1829,217 @@ local function reset_hunk_at_cursor()
     ui.notify("cursor is not on a hunk line", vim.log.levels.WARN)
     return
   end
-
-  local fd = state.file_diffs[meta.file_idx]
-  if not fd then return end
-
-  local hunk = fd.hunks[meta.hunk_idx]
+  local fd   = state.file_diffs[meta.file_idx]
+  local hunk = fd and fd.hunks[meta.hunk_idx]
   if not hunk then return end
 
-  -- Reconstruct patch text
-  local patch_lines = {
-    "--- a/" .. fd.old_file,
-    "+++ b/" .. fd.file,
-    hunk.header,
-  }
-  for _, dl in ipairs(hunk.lines) do
-    table.insert(patch_lines, dl.text)
-  end
+  local patch_lines = { "--- a/" .. fd.old_file, "+++ b/" .. fd.file, hunk.header }
+  for _, dl in ipairs(hunk.lines) do table.insert(patch_lines, dl.text) end
   local patch_text = table.concat(patch_lines, "\n") .. "\n"
 
-  -- Write to temp file and apply in reverse
   local tmpfile = vim.fn.tempname()
   local f = io.open(tmpfile, "w")
-  if not f then
-    ui.notify("failed to create temp file", vim.log.levels.ERROR)
-    return
-  end
-  f:write(patch_text)
-  f:close()
+  if not f then ui.notify("failed to create temp file", vim.log.levels.ERROR); return end
+  f:write(patch_text); f:close()
 
   local root = git.repo_root()
   vim.fn.system({ "git", "-C", root, "apply", "--reverse", tmpfile })
   vim.fn.delete(tmpfile)
-
-  if vim.v.shell_error ~= 0 then
-    ui.notify("git apply --reverse failed", vim.log.levels.ERROR)
-    return
-  end
+  if vim.v.shell_error ~= 0 then ui.notify("revert hunk failed", vim.log.levels.ERROR); return end
 
   M.refresh()
-  ui.notify("reset hunk in " .. fd.file, vim.log.levels.INFO)
+  ui.notify("reverted hunk in " .. fd.file, vim.log.levels.INFO)
+end
+
+local function stage_file_at_cursor()
+  local file = file_path_at_cursor()
+  if not file then return end
+  local root = git.repo_root()
+  vim.fn.system({ "git", "-C", root, "add", "--", file })
+  if vim.v.shell_error ~= 0 then ui.notify("git add failed", vim.log.levels.ERROR); return end
+  M.refresh()
+  ui.notify("staged " .. file, vim.log.levels.INFO)
+end
+
+local function stage_hunk_at_cursor()
+  local meta = meta_at_cursor()
+  if not meta or not meta.hunk_idx or not meta.file_idx then
+    ui.notify("cursor is not on a hunk line", vim.log.levels.WARN)
+    return
+  end
+  local fd   = state.file_diffs[meta.file_idx]
+  local hunk = fd and fd.hunks[meta.hunk_idx]
+  if not hunk then return end
+
+  local patch_lines = { "--- a/" .. fd.old_file, "+++ b/" .. fd.file, hunk.header }
+  for _, dl in ipairs(hunk.lines) do table.insert(patch_lines, dl.text) end
+  local patch_text = table.concat(patch_lines, "\n") .. "\n"
+
+  local tmpfile = vim.fn.tempname()
+  local f = io.open(tmpfile, "w")
+  if not f then ui.notify("failed to create temp file", vim.log.levels.ERROR); return end
+  f:write(patch_text); f:close()
+
+  local root = git.repo_root()
+  vim.fn.system({ "git", "-C", root, "apply", "--cached", tmpfile })
+  vim.fn.delete(tmpfile)
+  if vim.v.shell_error ~= 0 then ui.notify("git apply --cached failed", vim.log.levels.ERROR); return end
+
+  M.refresh()
+  ui.notify("staged hunk in " .. fd.file, vim.log.levels.INFO)
+end
+
+local function open_related_test_file()
+  local file = file_path_at_cursor()
+  if not file then return end
+  local root = git.repo_root()
+  local base = vim.fn.fnamemodify(file, ":t:r")
+  local ext  = vim.fn.fnamemodify(file, ":e")
+  local dir  = vim.fn.fnamemodify(file, ":h")
+
+  local candidates = {
+    dir .. "/" .. base .. "_test." .. ext,
+    dir .. "/" .. base .. ".test." .. ext,
+    dir .. "/" .. base .. "_spec." .. ext,
+    dir .. "/" .. base .. ".spec." .. ext,
+    "spec/" .. base .. "_spec." .. ext,
+    "test/" .. base .. "_test." .. ext,
+    "tests/" .. base .. "_test." .. ext,
+    "__tests__/" .. base .. ".test." .. ext,
+  }
+
+  for _, candidate in ipairs(candidates) do
+    if vim.fn.filereadable(root .. "/" .. candidate) == 1 then
+      pcall(vim.cmd, "tabprevious")
+      vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. candidate))
+      return
+    end
+  end
+  ui.notify("no related test file found for " .. file, vim.log.levels.WARN)
 end
 
 local function open_file_actions_menu()
   local meta = meta_at_cursor()
   if not meta or not meta.file then return end
 
+  -- Two-layer action system: primary flow actions, then maintenance
   local actions = {
-    { label = "Delete file",                       run = delete_file_at_cursor },
-    { label = "Add to .gitignore",                 run = add_to_gitignore_at_cursor },
-    { label = "Remove from tracking (git rm)",     run = remove_from_tracking_at_cursor },
-    { label = "Reset file (git checkout --)",      run = reset_file_at_cursor },
-    { label = "Rename file",                       run = rename_file_at_cursor },
-    { label = "Copy file path",                    run = copy_file_path_at_cursor },
-    { label = "Open in editor",                    run = open_source_at_cursor },
-    { label = "View file diff",                    run = view_file_diff_at_cursor },
+    -- Review flow
+    { label = "Mark reviewed",                       run = mark_reviewed_at_cursor },
+    { label = "Snooze / un-snooze file",             run = snooze_file_at_cursor },
+    { label = "Jump to next unreviewed",             run = jump_next_unreviewed },
+    { label = "Stage file  (git add)",               run = stage_file_at_cursor },
+    { label = "Open in editor",                      run = open_source_at_cursor },
+    { label = "Open in split",                       run = open_in_split_at_cursor },
+    { label = "Copy file path",                      run = copy_file_path_at_cursor },
+    { label = "Open related test file",              run = open_related_test_file },
+    { label = "View file diff (new tab)",            run = view_file_diff_at_cursor },
+    { label = "── maintenance ──────────────────",   run = nil },
+    { label = "Rename file",                         run = rename_file_at_cursor },
+    { label = "Revert file  (git checkout --)",      run = reset_file_at_cursor },
+    { label = "Add to .gitignore",                   run = add_to_gitignore_at_cursor },
+    { label = "Remove from tracking  (git rm)",      run = remove_from_tracking_at_cursor },
+    { label = "Delete file",                         run = delete_file_at_cursor },
   }
 
-  -- Add hunk-specific action if cursor is on a hunk-related line
   if meta.hunk_idx then
-    table.insert(actions, { label = "Reset hunk (git apply --reverse)", run = reset_hunk_at_cursor })
+    table.insert(actions, 5,
+      { label = "Stage hunk  (git apply --cached)",  run = stage_hunk_at_cursor })
+    table.insert(actions, 6,
+      { label = "Revert hunk  (git apply --reverse)", run = reset_hunk_at_cursor })
   end
 
   vim.ui.select(actions, {
-    prompt = "File actions: " .. meta.file,
+    prompt      = "Actions: " .. meta.file,
     format_item = function(item) return item.label end,
   }, function(choice)
-    if choice and choice.run then
-      choice.run()
-    end
+    if choice and choice.run then choice.run() end
   end)
 end
 
 local function remove_resolved_comments()
   local path = fs.review_file_path()
-  if not path then
-    ui.notify("unable to resolve review file path", vim.log.levels.ERROR)
-    return
-  end
+  if not path then ui.notify("unable to resolve review file path", vim.log.levels.ERROR); return end
 
   local items, err = store.load(path)
-  if not items then
-    ui.notify(err or "unable to load review comments", vim.log.levels.ERROR)
-    return
-  end
+  if not items then ui.notify(err or "unable to load review notes", vim.log.levels.ERROR); return end
 
   local next_items, removed = store.delete_by_statuses(items, { "fixed", "wontfix" })
-  if removed == 0 then
-    ui.notify("no resolved comments to remove", vim.log.levels.INFO)
-    return
-  end
+  if removed == 0 then ui.notify("no resolved notes to remove", vim.log.levels.INFO); return end
 
   local ok, save_err = store.save(path, next_items)
-  if not ok then
-    ui.notify(save_err or "failed to save review file", vim.log.levels.ERROR)
-    return
-  end
+  if not ok then ui.notify(save_err or "failed to save review file", vim.log.levels.ERROR); return end
 
   M.refresh()
-  ui.notify("removed " .. removed .. " resolved comments", vim.log.levels.INFO)
+  ui.notify("removed " .. removed .. " resolved notes", vim.log.levels.INFO)
 end
+
+-- ── Keymaps ───────────────────────────────────────────────────────────────────
 
 local function attach_keymaps(buf)
   local opts = { noremap = true, silent = true, buffer = buf }
-  local function bmap(lhs, fn)
-    vim.keymap.set("n", lhs, fn, opts)
-  end
+  local function bmap(lhs, fn) vim.keymap.set("n", lhs, fn, opts) end
 
-  bmap("v",        mark_viewed_at_cursor)
-  bmap("V",        mark_unviewed_at_cursor)
-  bmap("<leader>v", batch_mark_directory)
-  bmap("<leader>T", start_or_manage_timer)
-  bmap("<leader>F", cycle_focus)
+  bmap("v",           mark_reviewed_at_cursor)
+  bmap("V",           mark_unviewed_at_cursor)
+  bmap("s",           snooze_file_at_cursor)
+  bmap("<leader>v",   batch_mark_directory)
+  bmap("<leader>T",   start_or_manage_timer)
+  bmap("<leader>F",   cycle_rhythm)
   bmap("<CR>", function()
     local _, lnum = meta_at_cursor()
     toggle_fold_at(lnum)
   end)
-  bmap("]f",   function() navigate_files(1)  end)
-  bmap("[f",   function() navigate_files(-1) end)
+  bmap("]f",  function() navigate_files(1)  end)
+  bmap("[f",  function() navigate_files(-1) end)
   bmap("<leader>f", open_file_picker)
-  bmap("]c",   function() navigate_hunks(1)  end)
-  bmap("[c",   function() navigate_hunks(-1) end)
-  bmap("zC",   function()
+  bmap("]c",  function() navigate_hunks(1)  end)
+  bmap("[c",  function() navigate_hunks(-1) end)
+  bmap("zC",  function()
     local lnum = hunk_header_lnum_at_cursor()
     if lnum then collapse_hunk_context(lnum) end
   end)
-  bmap("zO",   function()
+  bmap("zO",  function()
     local lnum = hunk_header_lnum_at_cursor()
     if lnum then expand_hunk_context(lnum) end
   end)
-  bmap("zCA",  function()
-    local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
-    local line_meta = state.line_map[cursor_line]
-    local file_idx = line_meta and line_meta.file_idx
-    if file_idx then
-      for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
-        if state.line_map[hunk_lnum].file_idx == file_idx then
-          collapse_hunk_context(hunk_lnum)
+  bmap("zCA", function()
+    local cl = vim.api.nvim_win_get_cursor(0)[1]
+    local fi = state.line_map[cl] and state.line_map[cl].file_idx
+    if fi then
+      for _, hl in ipairs(state.hunk_header_lnums) do
+        if state.line_map[hl] and state.line_map[hl].file_idx == fi then
+          collapse_hunk_context(hl)
         end
       end
     end
   end)
-  bmap("zOA",  function()
-    local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
-    local line_meta = state.line_map[cursor_line]
-    local file_idx = line_meta and line_meta.file_idx
-    if file_idx then
-      for _, hunk_lnum in ipairs(state.hunk_header_lnums) do
-        if state.line_map[hunk_lnum].file_idx == file_idx then
-          expand_hunk_context(hunk_lnum)
+  bmap("zOA", function()
+    local cl = vim.api.nvim_win_get_cursor(0)[1]
+    local fi = state.line_map[cl] and state.line_map[cl].file_idx
+    if fi then
+      for _, hl in ipairs(state.hunk_header_lnums) do
+        if state.line_map[hl] and state.line_map[hl].file_idx == fi then
+          expand_hunk_context(hl)
         end
       end
     end
   end)
-  bmap("c",    add_comment_at_cursor)
-  bmap("C",    add_quick_comment_at_cursor)
-  bmap("K",    show_comment_popup)
-  bmap("<leader>a", open_file_actions_menu)
-  bmap("<leader>R", remove_resolved_comments)
-  bmap("go",   open_source_at_cursor)
-  bmap("R",    function() M.refresh() end)
-  bmap("q",    function() M.close()   end)
-  bmap("?",    function() M.show_help() end)
+  bmap("c",          add_comment_at_cursor)
+  bmap("C",          add_quick_comment_at_cursor)
+  bmap("K",          show_comment_popup)
+  bmap("<leader>a",  open_file_actions_menu)
+  bmap("<leader>R",  remove_resolved_comments)
+  bmap("go",         open_source_at_cursor)
+  bmap("R",          function() M.refresh() end)
+  bmap("q",          function() M.close()   end)
+  bmap("?",          function() M.show_help() end)
 end
 
--- ── Core open / refresh logic ────────────────────────────────────────────────
+-- ── Core render / open logic ──────────────────────────────────────────────────
 
 local function do_render(file_diffs, review_items, vst)
-  -- Clear hunk context marks from previous render
+  -- Clear previous hunk context
   if state.hunk_ctx_ns then
     vim.api.nvim_buf_clear_namespace(state.buf, state.hunk_ctx_ns, 0, -1)
   end
@@ -1903,48 +2051,57 @@ local function do_render(file_diffs, review_items, vst)
   state.fold_ranges       = fr
   state.file_header_lnums = fhl
   state.hunk_header_lnums = hhl
+
   apply_highlights(lm)
   apply_comment_badges(lm, comment_map)
   apply_heat_map(comment_map)
+  apply_rhythm_dims()
   update_sticky_header()
+
+  -- Re-apply active-file tint and hunk spotlight after render
+  if state.active_file then
+    apply_active_file_tint(state.active_file)
+  end
+  if state.active_hunk_lnum then
+    -- Re-find hunk header lnum by scanning for same file/hunk indices
+    -- (lnums shift after re-render, so we look up by file+hunk)
+    local target_file = state.line_map[state.active_hunk_lnum] and
+                        state.line_map[state.active_hunk_lnum].file
+    local target_hunk = state.line_map[state.active_hunk_lnum] and
+                        state.line_map[state.active_hunk_lnum].hunk_idx
+    if target_file and target_hunk then
+      for _, hl in ipairs(state.hunk_header_lnums) do
+        local hm = state.line_map[hl]
+        if hm and hm.file == target_file and hm.hunk_idx == target_hunk then
+          state.active_hunk_lnum = hl
+          apply_hunk_spotlight(hl)
+          break
+        end
+      end
+    end
+  end
 end
 
--- Sort file_diffs: viewed first (stable sort), then unviewed.
 local function sort_file_diffs(file_diffs, vst)
   local indexed = {}
-  for i, fd in ipairs(file_diffs) do
-    indexed[i] = { fd, i }  -- preserve original index for stable sort
-  end
+  for i, fd in ipairs(file_diffs) do indexed[i] = { fd, i } end
 
   table.sort(indexed, function(a, b)
-    local fd_a, idx_a = a[1], a[2]
-    local fd_b, idx_b = b[1], b[2]
-    local is_viewed_a = vst[fd_a.file] and vst[fd_a.file].viewed == true
-    local is_viewed_b = vst[fd_b.file] and vst[fd_b.file].viewed == true
-
-    -- Viewed files first
-    if is_viewed_a ~= is_viewed_b then
-      return is_viewed_a  -- true comes before false
-    end
-    -- Within same group, preserve original order
-    return idx_a < idx_b
+    local va = get_entry_mood(vst[a[1].file]) == "reviewed"
+    local vb = get_entry_mood(vst[b[1].file]) == "reviewed"
+    if va ~= vb then return va end   -- reviewed files first (true < false)
+    return a[2] < b[2]
   end)
 
-  -- Extract sorted file_diffs
   local sorted = {}
-  for _, pair in ipairs(indexed) do
-    table.insert(sorted, pair[1])
-  end
+  for _, pair in ipairs(indexed) do table.insert(sorted, pair[1]) end
   return sorted
 end
 
--- base_ref == nil   → diff working tree against HEAD (all uncommitted changes)
--- base_ref == string → diff <ref>...HEAD  (PR / branch-comparison style)
 local function do_open_or_refresh(base_ref)
   setup_hl()
-  state.base_ref = base_ref   -- nil is valid; persisted so refresh reuses it
+  state.base_ref = base_ref
 
-  -- Parse diff
   local file_diffs, err = git_diff.parse(base_ref)
   if not file_diffs then
     ui.notify("ReviewPR: " .. (err or "git diff failed"), vim.log.levels.ERROR)
@@ -1957,58 +2114,44 @@ local function do_open_or_refresh(base_ref)
   end
 
   local review_items = load_review_items()
+  local vst          = viewed_state.sync(file_diffs)
+  file_diffs         = sort_file_diffs(file_diffs, vst)
+  state.file_diffs   = file_diffs
 
-  -- Sync viewed state (auto-reset changed files)
-  local vst = viewed_state.sync(file_diffs)
-
-  -- Sort: viewed files first, then unviewed
-  file_diffs = sort_file_diffs(file_diffs, vst)
-  state.file_diffs = file_diffs
-
-  -- Create buffer if needed
   local is_new_buf = not state.buf or not vim.api.nvim_buf_is_valid(state.buf)
   if is_new_buf then
     local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_option(buf, "buftype",  "nofile")
-    vim.api.nvim_buf_set_option(buf, "bufhidden","wipe")
-    vim.api.nvim_buf_set_option(buf, "swapfile", false)
+    vim.api.nvim_buf_set_option(buf, "buftype",   "nofile")
+    vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+    vim.api.nvim_buf_set_option(buf, "swapfile",  false)
     pcall(vim.api.nvim_buf_set_name, buf, "locoreview://pr-review")
-    state.buf = buf
+    state.buf          = buf
+    state.session_start = os.time()
 
     vim.api.nvim_create_autocmd("BufDelete", {
       buffer = state.buf,
       once   = true,
       callback = function()
-        -- Cleanup timer
-        if state.timer ~= nil then
-          state.timer:stop()
-          state.timer:close()
-          state.timer = nil
-          state.timer_end = nil
-        end
-
-        -- Cleanup sticky header float
-        if state.sticky_autocmd ~= nil then
-          vim.api.nvim_del_autocmd(state.sticky_autocmd)
-          state.sticky_autocmd = nil
-        end
+        if state.timer then state.timer:stop(); state.timer:close(); state.timer = nil end
+        if state._ip_timer then state._ip_timer:stop(); state._ip_timer:close(); state._ip_timer = nil end
+        if state.sticky_autocmd then vim.api.nvim_del_autocmd(state.sticky_autocmd) end
+        if state.hint_autocmd   then vim.api.nvim_del_autocmd(state.hint_autocmd)   end
         if state.sticky_win and vim.api.nvim_win_is_valid(state.sticky_win) then
           vim.api.nvim_win_close(state.sticky_win, true)
-          state.sticky_win = nil
         end
-        state.sticky_buf = nil
-
-        state.buf     = nil
-        state.tabpage = nil
-        state.line_map    = {}
-        state.fold_ranges = {}
-        state.file_header_lnums = {}
-        state.hunk_header_lnums = {}
+        if state.hint_win and vim.api.nvim_win_is_valid(state.hint_win) then
+          vim.api.nvim_win_close(state.hint_win, true)
+        end
+        state.buf = nil; state.tabpage = nil
+        state.line_map = {}; state.fold_ranges = {}
+        state.file_header_lnums = {}; state.hunk_header_lnums = {}
+        state.timer_end = nil
+        state.sticky_win = nil; state.sticky_buf = nil; state.sticky_autocmd = nil
+        state.hint_win = nil; state.hint_buf = nil; state.hint_autocmd = nil
       end,
     })
   end
 
-  -- Save cursor position before refresh (for non-new buffers)
   if not is_new_buf then
     local win = get_win()
     local cur = (win and vim.api.nvim_win_get_cursor(win)) or state.pending_cursor
@@ -2016,18 +2159,13 @@ local function do_open_or_refresh(base_ref)
     state.pending_cursor = nil
   end
 
-  -- Render content into buffer
   do_render(file_diffs, review_items, vst)
 
-  -- Open / focus window
   if not is_alive() then
     vim.cmd("tabnew")
     state.tabpage = vim.api.nvim_get_current_tabpage()
     vim.api.nvim_win_set_buf(0, state.buf)
-    if is_new_buf then
-      attach_keymaps(state.buf)
-    end
-    -- Window-local display options
+    if is_new_buf then attach_keymaps(state.buf) end
     local win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_option(win, "number",         false)
     vim.api.nvim_win_set_option(win, "relativenumber", false)
@@ -2037,41 +2175,84 @@ local function do_open_or_refresh(base_ref)
     vim.api.nvim_set_current_tabpage(state.tabpage)
   end
 
-  -- Set up folds in the PR view window
   local win = get_win()
   if win then
     setup_folds(win, state.fold_ranges)
     create_sticky_header(win)
     update_sticky_header()
+    create_hint_bar(win)
 
-    -- Restore cursor position after refresh (for non-new buffers)
     if not is_new_buf and state.saved_cursor then
       vim.api.nvim_win_set_cursor(win, state.saved_cursor)
+    end
+
+    -- CursorMoved autocmd: hunk spotlight, hint bar, in_progress tracking
+    if is_new_buf and not state.hint_autocmd then
+      state.hint_autocmd = vim.api.nvim_create_autocmd("CursorMoved", {
+        buffer = state.buf,
+        callback = function()
+          local lnum = vim.api.nvim_win_get_cursor(0)[1]
+          local meta = state.line_map[lnum]
+          local new_file = meta and meta.file
+
+          -- Hunk spotlight (only update when hunk changes)
+          local new_hunk_lnum = hunk_header_lnum_at_lnum(lnum)
+          if new_hunk_lnum ~= state.active_hunk_lnum then
+            state.active_hunk_lnum = new_hunk_lnum
+            vim.schedule(function()
+              if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+                apply_hunk_spotlight(state.active_hunk_lnum)
+              end
+            end)
+          end
+
+          -- Active file tint (only update when file changes)
+          if new_file ~= state.active_file then
+            state.active_file = new_file
+            vim.schedule(function()
+              if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+                apply_active_file_tint(state.active_file)
+              end
+            end)
+
+            -- Mark in_progress (debounced)
+            if new_file then
+              if state._ip_timer then
+                state._ip_timer:stop(); state._ip_timer:close(); state._ip_timer = nil
+              end
+              state._ip_timer = vim.loop.new_timer()
+              state._ip_timer:start(600, 0, vim.schedule_wrap(function()
+                viewed_state.mark_in_progress(new_file)
+                state._ip_timer = nil
+              end))
+            end
+          end
+
+          -- Hint bar
+          vim.schedule(function()
+            update_hint_bar(meta)
+          end)
+        end,
+      })
     end
   end
 end
 
--- ── Public API ───────────────────────────────────────────────────────────────
+-- ── Public API ────────────────────────────────────────────────────────────────
 
--- Open the PR diff view.
---   base_ref supplied  → use it directly (e.g. ":ReviewPR origin/main")
---   base_ref omitted   → show a quick picker so the user can choose what to
---                         diff against; defaults to "uncommitted changes"
 function M.open(base_ref)
   if base_ref ~= nil then
-    -- Explicit ref supplied: open immediately.
     do_open_or_refresh(base_ref)
     return
   end
 
-  -- No explicit ref: offer a quick-pick.
-  local cfg       = config.get()
+  local cfg      = config.get()
   local auto_base = git.base_branch(cfg)
 
   local choices = {
-    { label = "Uncommitted changes  (git diff HEAD)",        ref = false },
-    { label = "vs " .. auto_base .. "  [PR-style]",         ref = auto_base },
-    { label = "Custom ref…",                                 ref = "custom" },
+    { label = "Uncommitted changes  (git diff HEAD)",   ref = false },
+    { label = "vs " .. auto_base .. "  [PR-style]",     ref = auto_base },
+    { label = "Custom ref…",                             ref = "custom" },
   }
 
   vim.ui.select(choices, {
@@ -2082,69 +2263,55 @@ function M.open(base_ref)
     if choice.ref == "custom" then
       ui.prompt_git_ref(auto_base, function(ref)
         if ref then
-          -- empty input → treat as uncommitted
           do_open_or_refresh(ref ~= "" and ref or nil)
         end
       end)
     else
-      -- false → nil (uncommitted), any string → branch ref
       do_open_or_refresh(choice.ref ~= false and choice.ref or nil)
     end
   end)
 end
 
--- Re-parse the diff and re-render in the existing tab (or open a new one).
 function M.refresh()
   do_open_or_refresh(state.base_ref)
   if is_alive() then
-    ui.notify("PR view refreshed", vim.log.levels.INFO)
+    ui.notify("refreshed", vim.log.levels.INFO)
   end
 end
 
--- Close the PR view tab.
 function M.close()
-  -- Cleanup timer
-  if state.timer ~= nil then
-    state.timer:stop()
-    state.timer:close()
-    state.timer = nil
-    state.timer_end = nil
+  if state.timer then
+    state.timer:stop(); state.timer:close()
+    state.timer = nil; state.timer_end = nil
   end
-
-  -- Cleanup sticky header float
-  if state.sticky_autocmd ~= nil then
-    vim.api.nvim_del_autocmd(state.sticky_autocmd)
-    state.sticky_autocmd = nil
+  if state._ip_timer then
+    state._ip_timer:stop(); state._ip_timer:close(); state._ip_timer = nil
+  end
+  if state.sticky_autocmd then
+    vim.api.nvim_del_autocmd(state.sticky_autocmd); state.sticky_autocmd = nil
+  end
+  if state.hint_autocmd then
+    vim.api.nvim_del_autocmd(state.hint_autocmd); state.hint_autocmd = nil
   end
   if state.sticky_win and vim.api.nvim_win_is_valid(state.sticky_win) then
-    vim.api.nvim_win_close(state.sticky_win, true)
-    state.sticky_win = nil
+    vim.api.nvim_win_close(state.sticky_win, true); state.sticky_win = nil
   end
-  state.sticky_buf = nil
+  if state.hint_win and vim.api.nvim_win_is_valid(state.hint_win) then
+    vim.api.nvim_win_close(state.hint_win, true); state.hint_win = nil
+  end
+  state.sticky_buf = nil; state.hint_buf = nil
 
-  -- Cleanup focus mode
-  if state.focus_level > 0 then
-    if state.focus_level == 2 and state.buf then
-      pcall(vim.keymap.del, "n", "<Space>", { buffer = state.buf })
-    end
-    if state.dim_ns then
-      pcall(vim.api.nvim_buf_clear_namespace, state.buf, state.dim_ns, 0, -1)
-    end
-    if state.hunk_dim_ns then
-      pcall(vim.api.nvim_buf_clear_namespace, state.buf, state.hunk_dim_ns, 0, -1)
-    end
-    if state.saved_ui.laststatus ~= nil then
-      vim.o.laststatus = state.saved_ui.laststatus
-    end
-    if state.saved_ui.showtabline ~= nil then
-      vim.o.showtabline = state.saved_ui.showtabline
-    end
-    state.focus_level = 0
-    state.focus_queue = {}
-    state.saved_ui = {}
+  -- Restore UI chrome if rhythm mode had hidden it
+  if state.saved_ui.laststatus  ~= nil then vim.o.laststatus  = state.saved_ui.laststatus  end
+  if state.saved_ui.showtabline ~= nil then vim.o.showtabline = state.saved_ui.showtabline end
+  state.rhythm_mode  = "overview"
+  state.rhythm_queue = {}
+  state.saved_ui     = {}
+
+  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+    pcall(vim.keymap.del, "n", "<Space>", { buffer = state.buf })
   end
 
-  -- Cleanup hunk context namespace
   if state.hunk_ctx_ns and state.buf and vim.api.nvim_buf_is_valid(state.buf) then
     pcall(vim.api.nvim_buf_clear_namespace, state.buf, state.hunk_ctx_ns, 0, -1)
   end
@@ -2156,43 +2323,53 @@ function M.close()
       vim.cmd("tabclose")
     end)
   end
-  state.tabpage = nil
-  state.buf     = nil
-  state.line_map    = {}
-  state.fold_ranges = {}
+  state.tabpage           = nil
+  state.buf               = nil
+  state.line_map          = {}
+  state.fold_ranges       = {}
   state.file_header_lnums = {}
   state.hunk_header_lnums = {}
+  state.active_file       = nil
+  state.active_hunk_lnum  = nil
 end
 
 function M.show_help()
   local lines = {
-    "locoreview PR view keymaps",
-    "  v          mark file viewed + collapse",
-    "  V          mark file unviewed + expand",
-    "  <leader>v  mark all files in same directory as viewed",
-    "  <CR>       toggle file fold",
-    "  ]f / [f    next / previous file",
-    "  ]c / [c    next / previous hunk",
-    "  c          add review comment at cursor line",
-    "  C          quick comment (one prompt, low severity)",
-    "  K          show full comment popup",
-    "  <leader>a  quick file actions (delete/rename/copy/open/diff)",
-    "  <leader>R  remove all resolved comments (fixed + wontfix)",
-    "  go         open source file at cursor line",
-    "  <leader>T  start / cancel timed review session",
-    "  <leader>F  cycle focus mode (Off → File → Hunk)",
-    "  <Space>    advance to next hunk (Focus Hunk mode only)",
-    "  zC / zO    collapse / expand hunk context",
-    "  zCA / zOA  collapse / expand all hunks in file",
-    "  <leader>f  open file jump picker",
-    "  R          refresh diff",
-    "  q          close",
-    "  ?          this help",
+    "locoreview PR view",
+    "  v / V         mark file reviewed / un-reviewed",
+    "  s             snooze file (skip in rhythm; toggle to un-snooze)",
+    "  <leader>v     mark all files in directory as reviewed",
+    "  <CR>          toggle file fold",
+    "  ]f / [f       next / previous file",
+    "  ]c / [c       next / previous hunk",
+    "  c             add review comment at cursor line",
+    "  C             quick note (one prompt, low severity)",
+    "  K             show full comment popup",
+    "  <leader>a     actions menu (review + maintenance)",
+    "  <leader>R     remove resolved notes (fixed + wontfix)",
+    "  go            open source file at cursor",
+    "  <leader>T     start / cancel timed review session",
+    "  <leader>F     cycle rhythm mode  (overview → focus → sweep)",
+    "  <Space>       advance to next file  (focus / sweep modes)",
+    "  zC / zO       collapse / expand hunk context",
+    "  zCA / zOA     collapse / expand all hunks in file",
+    "  <leader>f     jump-to-file picker",
+    "  R             refresh",
+    "  q             close",
+    "  ?             this help",
+    "",
+    "Rhythm modes:",
+    "  overview  — all files visible, no dimming",
+    "  focus     — one file at a time; others dimmed; <Space> advances",
+    "  sweep     — reviewed files dimmed; <Space> cycles pending files",
+    "",
+    "File moods:",
+    "  ○ untouched   ◑ in progress   ● reviewed",
+    "  ⏸ snoozed     ⊗ blocked        ⚠ risky   ⌁ generated",
   }
   ui.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
 end
 
--- Check if PR view is currently open
 function M.is_open()
   return is_alive()
 end

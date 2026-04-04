@@ -27,8 +27,10 @@ M.defaults = {
   },
   pr_view = {
     auto_advance_on_viewed = true,
-    micro_rewards = true,
-    focus_queue_order = "size",
+    micro_rewards          = true,
+    risky_threshold        = 150,   -- lines changed to flag a file as "risky"
+    generated_patterns     = nil,   -- extra patterns appended to built-in list
+    action_hints           = true,  -- show bottom hint bar
   },
 }
 
