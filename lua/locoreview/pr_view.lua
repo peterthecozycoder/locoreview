@@ -67,7 +67,9 @@ local state = {
   tint_ns           = nil,
   -- Cursor persistence
   saved_cursor      = nil,
+  saved_anchor      = nil,
   pending_cursor    = nil,
+  pending_anchor    = nil,
   -- Debounce timer for in_progress marking
   _ip_timer         = nil,
 }
@@ -959,6 +961,94 @@ local function meta_at_cursor()
   return state.line_map[lnum], lnum
 end
 
+local function line_count(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  return #lines
+end
+
+local function clamp_cursor_target(target)
+  if not (target and target[1]) then return nil end
+  local max_lnum = math.max(1, line_count(state.buf))
+  local lnum = math.min(math.max(target[1], 1), max_lnum)
+  local col = math.max(target[2] or 0, 0)
+  return { lnum, col }
+end
+
+local function capture_cursor_anchor(meta, lnum, col)
+  local anchor = {
+    lnum = lnum,
+    col  = col or 0,
+  }
+  if meta and meta.file then
+    anchor.file     = meta.file
+    anchor.type     = meta.type
+    anchor.hunk_idx = meta.hunk_idx
+    anchor.old_line = meta.old_line
+    anchor.new_line = meta.new_line
+  end
+  return anchor
+end
+
+local function capture_cursor_anchor_from_win(win)
+  if not win then return nil end
+  local cur = vim.api.nvim_win_get_cursor(win)
+  local lnum = cur[1]
+  local col  = cur[2] or 0
+  local meta = state.line_map[lnum]
+  return capture_cursor_anchor(meta, lnum, col)
+end
+
+local function queue_cursor_restore(meta, lnum, col)
+  if not lnum then return end
+  local anchor = capture_cursor_anchor(meta, lnum, col)
+  state.pending_anchor = anchor
+  state.pending_cursor = { lnum, col or 0 } -- backwards-compat fallback
+end
+
+local function resolve_anchor_to_cursor(anchor)
+  if not anchor then return nil end
+  local col = anchor.col or 0
+
+  if anchor.file and anchor.type then
+    -- Best effort: same concrete diff line.
+    if anchor.type == "add" or anchor.type == "remove" or anchor.type == "context" then
+      for lnum, meta in pairs(state.line_map) do
+        if meta.file == anchor.file and meta.type == anchor.type then
+          local old_ok = (anchor.old_line == nil) or (meta.old_line == anchor.old_line)
+          local new_ok = (anchor.new_line == nil) or (meta.new_line == anchor.new_line)
+          if old_ok and new_ok then
+            return { lnum, col }
+          end
+        end
+      end
+    end
+
+    if anchor.type == "hunk_header" and anchor.hunk_idx then
+      for _, lnum in ipairs(state.hunk_header_lnums) do
+        local meta = state.line_map[lnum]
+        if meta and meta.file == anchor.file and meta.hunk_idx == anchor.hunk_idx then
+          return { lnum, col }
+        end
+      end
+    end
+  end
+
+  -- Fallback: same file header.
+  if anchor.file then
+    for _, lnum in ipairs(state.file_header_lnums) do
+      local meta = state.line_map[lnum]
+      if meta and meta.file == anchor.file then
+        return { lnum, 0 }
+      end
+    end
+  end
+
+  if anchor.lnum then
+    return clamp_cursor_target({ anchor.lnum, col })
+  end
+  return nil
+end
+
 local function diff_hash_for(file)
   for _, fd in ipairs(state.file_diffs) do
     if fd.file == file then return fd.diff_hash end
@@ -1519,13 +1609,14 @@ end
 -- ── Review actions ────────────────────────────────────────────────────────────
 
 local function mark_reviewed_at_cursor()
-  local meta = meta_at_cursor()
+  local meta, lnum = meta_at_cursor()
   if not meta or not meta.file then
     ui.notify("not on a diff line", vim.log.levels.WARN)
     return
   end
 
   local file = meta.file
+  queue_cursor_restore(meta, lnum, 0)
   viewed_state.mark_reviewed(file, diff_hash_for(file))
 
   -- Micro-reward animation
@@ -1567,20 +1658,22 @@ end
 local mark_viewed_at_cursor = mark_reviewed_at_cursor
 
 local function mark_unviewed_at_cursor()
-  local meta = meta_at_cursor()
+  local meta, lnum = meta_at_cursor()
   if not meta or not meta.file then return end
+  queue_cursor_restore(meta, lnum, 0)
   viewed_state.mark_unviewed(meta.file)
   M.refresh()
 end
 
 local function snooze_file_at_cursor()
-  local meta = meta_at_cursor()
+  local meta, lnum = meta_at_cursor()
   if not meta or not meta.file then
     ui.notify("not on a file line", vim.log.levels.WARN)
     return
   end
 
   local file = meta.file
+  queue_cursor_restore(meta, lnum, 0)
   if viewed_state.is_snoozed(file) then
     viewed_state.unsnooze(file)
     ui.notify("un-snoozed " .. file, vim.log.levels.INFO)
@@ -1630,7 +1723,7 @@ end
 -- ── Comment actions ───────────────────────────────────────────────────────────
 
 local function add_comment_at_cursor()
-  local meta = meta_at_cursor()
+  local meta, lnum = meta_at_cursor()
   if not meta or not meta.file then
     ui.notify("place cursor on a diff line to comment", vim.log.levels.WARN)
     return
@@ -1647,12 +1740,15 @@ local function add_comment_at_cursor()
   end
 
   local win = get_win()
-  if win then state.pending_cursor = vim.api.nvim_win_get_cursor(win) end
+  if win then
+    local cur = vim.api.nvim_win_get_cursor(win)
+    queue_cursor_restore(meta, lnum or cur[1], cur[2] or 0)
+  end
   require("locoreview.commands").add_at(meta.file, line, nil, line_ref)
 end
 
 local function add_quick_comment_at_cursor()
-  local meta = meta_at_cursor()
+  local meta, lnum = meta_at_cursor()
   if not meta or not meta.file then
     ui.notify("place cursor on a diff line to comment", vim.log.levels.WARN)
     return
@@ -1669,7 +1765,10 @@ local function add_quick_comment_at_cursor()
   end
 
   local win = get_win()
-  if win then state.pending_cursor = vim.api.nvim_win_get_cursor(win) end
+  if win then
+    local cur = vim.api.nvim_win_get_cursor(win)
+    queue_cursor_restore(meta, lnum or cur[1], cur[2] or 0)
+  end
 
   vim.ui.input({ prompt = "Quick note: " }, function(text)
     if not text or text:match("^%s*$") then return end
@@ -1873,7 +1972,7 @@ end
 -- ── Batch directory mark ──────────────────────────────────────────────────────
 
 local function batch_mark_directory()
-  local meta = meta_at_cursor()
+  local meta, lnum = meta_at_cursor()
   if not meta or not meta.file then
     ui.notify("cursor not on a diff line", vim.log.levels.WARN)
     return
@@ -1899,6 +1998,7 @@ local function batch_mark_directory()
              .. (dir ~= "" and dir or "/") .. "/ as reviewed?",
   }, function(choice)
     if choice == "Yes" then
+      queue_cursor_restore(meta, lnum, 0)
       for _, fd in ipairs(files_in_dir) do
         viewed_state.mark_reviewed(fd.file, fd.diff_hash)
       end
@@ -1992,9 +2092,6 @@ local function open_in_split_at_cursor()
 end
 
 local function refresh_after_worktree_change()
-  if state.base_ref ~= nil then
-    state.base_ref = nil
-  end
   M.refresh()
 end
 
@@ -2351,6 +2448,10 @@ local function render_empty_view(desc)
   state.fold_ranges       = {}
   state.file_header_lnums = {}
   state.hunk_header_lnums = {}
+  state.saved_cursor      = nil
+  state.saved_anchor      = nil
+  state.pending_cursor    = nil
+  state.pending_anchor    = nil
   state.active_file       = nil
   state.active_hunk_lnum  = nil
   state.hunk_ctx_marks    = {}
@@ -2497,6 +2598,8 @@ local function do_open_or_refresh(base_ref)
         state.buf = nil; state.tabpage = nil
         state.line_map = {}; state.fold_ranges = {}
         state.file_header_lnums = {}; state.hunk_header_lnums = {}
+        state.saved_cursor = nil; state.saved_anchor = nil
+        state.pending_cursor = nil; state.pending_anchor = nil
         state.timer_end = nil
         state.sticky_win = nil; state.sticky_buf = nil; state.sticky_autocmd = nil
         state.hint_win = nil; state.hint_buf = nil; state.hint_autocmd = nil
@@ -2506,8 +2609,24 @@ local function do_open_or_refresh(base_ref)
 
   if not is_new_buf then
     local win = get_win()
-    local cur = (win and vim.api.nvim_win_get_cursor(win)) or state.pending_cursor
-    if cur then state.saved_cursor = cur end
+    if state.pending_anchor then
+      state.saved_anchor = state.pending_anchor
+    elseif win then
+      state.saved_anchor = capture_cursor_anchor_from_win(win)
+    elseif state.pending_cursor and state.pending_cursor[1] then
+      state.saved_anchor = {
+        lnum = state.pending_cursor[1],
+        col  = state.pending_cursor[2] or 0,
+      }
+    else
+      state.saved_anchor = nil
+    end
+    if state.saved_anchor and state.saved_anchor.lnum then
+      state.saved_cursor = { state.saved_anchor.lnum, state.saved_anchor.col or 0 }
+    else
+      state.saved_cursor = nil
+    end
+    state.pending_anchor = nil
     state.pending_cursor = nil
   end
 
@@ -2534,8 +2653,12 @@ local function do_open_or_refresh(base_ref)
     update_sticky_header()
     create_hint_bar(win)
 
-    if not is_new_buf and state.saved_cursor then
-      vim.api.nvim_win_set_cursor(win, state.saved_cursor)
+    if not is_new_buf then
+      local target = resolve_anchor_to_cursor(state.saved_anchor) or state.saved_cursor
+      if target then
+        local clamped = clamp_cursor_target(target)
+        if clamped then pcall(vim.api.nvim_win_set_cursor, win, clamped) end
+      end
     end
 
     -- CursorMoved autocmd: hunk spotlight, hint bar, in_progress tracking
