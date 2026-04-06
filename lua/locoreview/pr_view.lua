@@ -1802,12 +1802,11 @@ local function open_in_split_at_cursor()
   vim.api.nvim_win_set_cursor(0, { line, 0 })
 end
 
-local function close_loaded_buffer_for(path)
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end
+local function refresh_after_worktree_change()
+  if state.base_ref ~= nil then
+    state.base_ref = nil
   end
+  M.refresh()
 end
 
 local function delete_file_at_cursor()
@@ -1818,8 +1817,7 @@ local function delete_file_at_cursor()
 
   local rc = vim.fn.delete(path)
   if rc ~= 0 then ui.notify("failed to delete " .. file, vim.log.levels.ERROR); return end
-  close_loaded_buffer_for(path)
-  M.refresh()
+  refresh_after_worktree_change()
   ui.notify("deleted " .. file, vim.log.levels.INFO)
 end
 
@@ -1851,7 +1849,7 @@ local function rename_file_at_cursor()
       ui.notify("failed to rename " .. file, vim.log.levels.ERROR)
       return
     end
-    M.refresh()
+    refresh_after_worktree_change()
     ui.notify("renamed " .. file .. " → " .. target, vim.log.levels.INFO)
   end)
 end
@@ -1915,7 +1913,7 @@ local function remove_from_tracking_at_cursor()
   if not root then return end
   vim.fn.system({ "git", "-C", root, "rm", "--cached", "--", file })
   if vim.v.shell_error ~= 0 then ui.notify("git rm --cached failed", vim.log.levels.ERROR); return end
-  M.refresh()
+  refresh_after_worktree_change()
   ui.notify("removed " .. file .. " from tracking", vim.log.levels.INFO)
 end
 
@@ -1926,7 +1924,7 @@ local function reset_file_at_cursor()
   if not root then return end
   vim.fn.system({ "git", "-C", root, "checkout", "--", file })
   if vim.v.shell_error ~= 0 then ui.notify("git checkout -- failed", vim.log.levels.ERROR); return end
-  M.refresh()
+  refresh_after_worktree_change()
   ui.notify("reverted " .. file, vim.log.levels.INFO)
 end
 
@@ -1958,7 +1956,7 @@ local function reset_hunk_at_cursor()
   vim.fn.delete(tmpfile)
   if vim.v.shell_error ~= 0 then ui.notify("revert hunk failed", vim.log.levels.ERROR); return end
 
-  M.refresh()
+  refresh_after_worktree_change()
   ui.notify("reverted hunk in " .. fd.file, vim.log.levels.INFO)
 end
 
@@ -1969,7 +1967,7 @@ local function stage_file_at_cursor()
   if not root then return end
   vim.fn.system({ "git", "-C", root, "add", "--", file })
   if vim.v.shell_error ~= 0 then ui.notify("git add failed", vim.log.levels.ERROR); return end
-  M.refresh()
+  refresh_after_worktree_change()
   ui.notify("staged " .. file, vim.log.levels.INFO)
 end
 
@@ -2001,7 +1999,7 @@ local function stage_hunk_at_cursor()
   vim.fn.delete(tmpfile)
   if vim.v.shell_error ~= 0 then ui.notify("git apply --cached failed", vim.log.levels.ERROR); return end
 
-  M.refresh()
+  refresh_after_worktree_change()
   ui.notify("staged hunk in " .. fd.file, vim.log.levels.INFO)
 end
 
@@ -2145,6 +2143,7 @@ local function attach_keymaps(buf)
   bmap("c",          add_comment_at_cursor)
   bmap("C",          add_quick_comment_at_cursor)
   bmap("K",          show_comment_popup)
+  bmap("d",          open_file_actions_menu)
   bmap("<leader>a",  open_file_actions_menu)
   bmap("<leader>R",  remove_resolved_comments)
   bmap("go",         open_source_at_cursor)
