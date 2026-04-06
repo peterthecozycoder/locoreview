@@ -20,6 +20,7 @@ describe("review commands", function()
     state.severity = "medium"
     state.diff_only = false
     state.changed_lines = {}
+    state.ensure_file_ok = true
   end
 
   setup(function()
@@ -88,7 +89,6 @@ describe("review commands", function()
           default_severity = "medium",
           default_author = nil,
           diff_only = state.diff_only,
-          diffview = { enabled = true },
           picker = { enabled = true, backend = "auto" },
           agent = { enabled = false, cmd = "agent", open_in_split = true },
         }
@@ -99,7 +99,7 @@ describe("review commands", function()
         return "/repo/review.md"
       end,
       ensure_file = function()
-        return true
+        return state.ensure_file_ok
       end,
     }
     package.loaded["locoreview.git"] = {
@@ -190,11 +190,6 @@ describe("review commands", function()
       refresh = function()
       end,
     }
-    package.loaded["locoreview.diffview"] = {
-      is_available = function()
-        return false
-      end,
-    }
     package.loaded["locoreview.picker"] = {
       open = function()
       end,
@@ -243,6 +238,12 @@ describe("review commands", function()
     }
 
     created.ReviewAddRange({})
+    assert.are.equal(0, #state.insert_calls)
+  end)
+
+  it("aborts add when review file creation fails", function()
+    state.ensure_file_ok = false
+    created.ReviewAdd({})
     assert.are.equal(0, #state.insert_calls)
   end)
 

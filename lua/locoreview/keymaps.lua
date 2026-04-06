@@ -10,8 +10,6 @@ local defaults = {
   mark_fixed = "<leader>rf",
   clean = "<leader>rc",
   reopen = "<leader>rr",
-  diff = "<leader>rd",
-  file_history = "<leader>rh",
   fix = "<leader>rx",
   edit = "<leader>re",
   delete = "<leader>rD",
@@ -20,6 +18,8 @@ local defaults = {
   refresh = "<leader>rR",
   picker = "<leader>rk",
   toggle_signs = "<leader>rs",
+  open_diff = "<leader>rv",
+  pr        = "<leader>rP",
 }
 
 local command_for = {
@@ -32,8 +32,6 @@ local command_for = {
   mark_fixed = "ReviewMarkFixed",
   clean = "ReviewClean",
   reopen = "ReviewReopen",
-  diff = "ReviewDiff",
-  file_history = "ReviewFileHistory",
   fix = "ReviewFix",
   edit = "ReviewEdit",
   delete = "ReviewDelete",
@@ -42,6 +40,8 @@ local command_for = {
   refresh = "ReviewRefresh",
   picker = "ReviewPicker",
   toggle_signs = "ReviewToggleSigns",
+  open_diff = "ReviewOpenDiff",
+  pr        = "ReviewPR",
 }
 
 function M.setup(cfg)

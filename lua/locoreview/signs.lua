@@ -75,9 +75,11 @@ function M.refresh(items)
     if item.status == "open" or item.status == "blocked" then
       local abs = root .. "/" .. item.file
       per_file[abs] = per_file[abs] or {}
-      local existing = per_file[abs][item.line]
-      if not existing or (existing.status == "open" and item.status == "blocked") then
-        per_file[abs][item.line] = item
+      for lnum = item.line, (item.end_line or item.line) do
+        local existing = per_file[abs][lnum]
+        if not existing or (existing.status == "open" and item.status == "blocked") then
+          per_file[abs][lnum] = item
+        end
       end
     end
   end
@@ -93,7 +95,7 @@ function M.refresh(items)
             priority = priority,
           })
 
-          if show_virtual and ns then
+          if show_virtual and ns and line == item.line then
             vim.api.nvim_buf_set_extmark(bufnr, ns, line - 1, 0, {
               virt_text = { { "review: " .. util.truncate(item.issue, 60), "Comment" } },
               virt_text_pos = "eol",

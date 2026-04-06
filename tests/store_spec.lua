@@ -59,6 +59,22 @@ describe("review store", function()
     assert.is_truthy(err)
   end)
 
+  it("deletes all items matching statuses", function()
+    local items = {
+      { id = "RV-0001", status = "open", issue = "keep" },
+      { id = "RV-0002", status = "fixed", issue = "drop" },
+      { id = "RV-0003", status = "wontfix", issue = "drop" },
+      { id = "RV-0004", status = "blocked", issue = "keep" },
+    }
+
+    local next_items, removed = store.delete_by_statuses(items, { "fixed", "wontfix" })
+    assert.are.equal(2, removed)
+    assert.are.equal(2, #next_items)
+    assert.are.equal("RV-0001", next_items[1].id)
+    assert.are.equal("RV-0004", next_items[2].id)
+    assert.are.equal(4, #items)
+  end)
+
   it("updates item fields", function()
     local items = {
       {

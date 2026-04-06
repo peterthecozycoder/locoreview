@@ -9,7 +9,7 @@ OVERVIEW                                                        *locoreview-over
 - Structured markdown file format (`review.md` by default)
 - Local-first workflow for review comments
 - Quickfix + picker navigation
-- Optional integrations (Diffview, signs, agent command)
+- Optional integrations (picker backends, signs, agent command)
 
 ==============================================================================
 INSTALLATION                                                  *locoreview-install*
@@ -18,10 +18,6 @@ With lazy.nvim:
 >
   {
     "yourname/locoreview.nvim",
-    dependencies = {
-      "nvim-lua/plenary.nvim",
-      { "sindrets/diffview.nvim", optional = true },
-    },
     opts = {},
   }
 <
@@ -38,11 +34,15 @@ Key config fields:
 - `review_file` (default: `"review.md"`)
 - `default_severity` (`"low"`, `"medium"`, `"high"`)
 - `keymaps` (`true`, `false`, or override table)
-- `diffview.enabled`
 - `signs.enabled`, `signs.priority`
 - `picker.enabled`, `picker.backend`
 - `diff_only`
 - `agent.enabled`, `agent.cmd`, `agent.open_in_split`
+- `pr_view.auto_advance_on_viewed`, `pr_view.micro_rewards`
+- `pr_view.risky_threshold`, `pr_view.generated_patterns`
+- `pr_view.action_hints`
+- `pr_view.rhythm_advance_key` (default auto: `<Space>`, or `<Tab>` when
+  `mapleader` is `<Space>`)
 
 ==============================================================================
 COMMANDS                                                      *locoreview-commands*
@@ -57,8 +57,8 @@ Core:
 - `:ReviewMarkFixed`
 - `:ReviewClean`
 - `:ReviewReopen`
-- `:ReviewDiff`
-- `:ReviewFileHistory`
+- `:ReviewPR [base_ref]`
+- `:ReviewOpenDiff`
 - `:ReviewFix`
 
 v1.5:
@@ -85,8 +85,6 @@ Default keymaps (when enabled):
 - `<leader>rf` `ReviewMarkFixed`
 - `<leader>rc` `ReviewClean`
 - `<leader>rr` `ReviewReopen`
-- `<leader>rd` `ReviewDiff`
-- `<leader>rh` `ReviewFileHistory`
 - `<leader>rx` `ReviewFix`
 - `<leader>re` `ReviewEdit`
 - `<leader>rD` `ReviewDelete`
@@ -95,6 +93,8 @@ Default keymaps (when enabled):
 - `<leader>rR` `ReviewRefresh`
 - `<leader>rk` `ReviewPicker`
 - `<leader>rs` `ReviewToggleSigns`
+- `<leader>rv` `ReviewOpenDiff`
+- `<leader>rP` `ReviewPR`
 
 ==============================================================================
 REVIEW FILE FORMAT                                            *locoreview-file-format*
@@ -132,10 +132,6 @@ Rules:
 ==============================================================================
 INTEGRATIONS                                                *locoreview-integrations*
 
-Diffview:
-- `:ReviewDiff`
-- `:ReviewFileHistory`
-
 Picker backends:
 - auto: Telescope -> fzf-lua -> snacks -> `vim.ui.select`
 
@@ -148,7 +144,6 @@ TROUBLESHOOTING                                            *locoreview-troublesh
 - If commands are missing, verify plugin loaded and run setup.
 - If add commands fail, verify current buffer is a file in the repo.
 - If quickfix is empty, check item statuses and parser errors.
-- If Diffview commands fail, install `sindrets/diffview.nvim`.
 - If picker command fails, set `picker.backend = "none"` or install a backend.
 
 ==============================================================================

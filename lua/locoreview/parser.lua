@@ -133,6 +133,11 @@ local function parse_item(lines, start_i)
     return nil, nil, string.format("%s: missing required field: issue", id)
   end
 
+  -- Normalize line_ref: if not "old", default to "new"
+  if item.line_ref ~= "old" then
+    item.line_ref = "new"
+  end
+
   local validated, err = types.new_item(item)
   if not validated then
     return nil, nil, string.format("%s: %s", id, err)
