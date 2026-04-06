@@ -377,9 +377,20 @@ local function build_header_model(file_diffs, review_items, file_moods)
   }
 end
 
+local function display_width(text)
+  if vim.fn and type(vim.fn.strdisplaywidth) == "function" then
+    local ok, width = pcall(vim.fn.strdisplaywidth, text)
+    if ok and type(width) == "number" then
+      return width
+    end
+  end
+  return #text
+end
+
 local function pad_right(text, width)
-  if #text >= width then return text end
-  return text .. string.rep(" ", width - #text)
+  local w = display_width(text)
+  if w >= width then return text end
+  return text .. string.rep(" ", width - w)
 end
 
 local function render_header_block(model)
@@ -400,7 +411,7 @@ local function render_header_block(model)
 
   local inner_w = 68
   for _, line in ipairs(content) do
-    inner_w = math.max(inner_w, #line)
+    inner_w = math.max(inner_w, display_width(line))
   end
 
   local border = "  +" .. string.rep("-", inner_w + 2) .. "+"
@@ -1039,8 +1050,10 @@ local function update_sticky_header()
   end
 
   vim.api.nvim_buf_set_option(state.sticky_buf, "modifiable", true)
+  vim.api.nvim_buf_clear_namespace(state.sticky_buf, ensure_ns(), 0, -1)
   if not header_lnum or header_lnum == top then
-    vim.api.nvim_buf_set_lines(state.sticky_buf, 0, -1, false, { "" })
+    local top_text = vim.api.nvim_buf_get_lines(state.buf, top - 1, top, false)[1]
+    vim.api.nvim_buf_set_lines(state.sticky_buf, 0, -1, false, { top_text or "" })
   else
     local text = vim.api.nvim_buf_get_lines(state.buf, header_lnum - 1, header_lnum, false)[1]
     vim.api.nvim_buf_set_lines(state.sticky_buf, 0, -1, false, { text or "" })
