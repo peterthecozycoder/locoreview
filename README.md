@@ -49,6 +49,7 @@ require("locoreview").setup({})
 | --- | --- |
 | `:ReviewEdit` | Edit issue/requested_change/severity |
 | `:ReviewMarkFixed` | Transition open item to fixed |
+| `:ReviewClean` | Remove all fixed items from the review file |
 | `:ReviewReopen` | Transition non-open item to open |
 | `:ReviewMarkBlocked` | Transition open item to blocked |
 | `:ReviewMarkWontfix` | Transition open item to wontfix |
