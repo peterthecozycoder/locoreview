@@ -1619,7 +1619,7 @@ local function mark_reviewed_at_cursor()
   end
 
   local file = meta.file
-  queue_cursor_restore(meta, lnum, 0)
+  queue_cursor_restore(nil, lnum, 0)
   viewed_state.mark_reviewed(file, diff_hash_for(file))
 
   -- Micro-reward animation
@@ -1663,7 +1663,7 @@ local mark_viewed_at_cursor = mark_reviewed_at_cursor
 local function mark_unviewed_at_cursor()
   local meta, lnum = meta_at_cursor()
   if not meta or not meta.file then return end
-  queue_cursor_restore(meta, lnum, 0)
+  queue_cursor_restore(nil, lnum, 0)
   viewed_state.mark_unviewed(meta.file)
   M.refresh()
 end
@@ -1676,7 +1676,7 @@ local function snooze_file_at_cursor()
   end
 
   local file = meta.file
-  queue_cursor_restore(meta, lnum, 0)
+  queue_cursor_restore(nil, lnum, 0)
   if viewed_state.is_snoozed(file) then
     viewed_state.unsnooze(file)
     ui.notify("un-snoozed " .. file, vim.log.levels.INFO)
@@ -2001,7 +2001,7 @@ local function batch_mark_directory()
              .. (dir ~= "" and dir or "/") .. "/ as reviewed?",
   }, function(choice)
     if choice == "Yes" then
-      queue_cursor_restore(meta, lnum, 0)
+      queue_cursor_restore(nil, lnum, 0)
       for _, fd in ipairs(files_in_dir) do
         viewed_state.mark_reviewed(fd.file, fd.diff_hash)
       end
