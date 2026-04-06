@@ -7,14 +7,9 @@
 ```lua
 {
   "peterthecozycoder/locoreview",
-  dependencies = {
-    "nvim-lua/plenary.nvim",
-    { "sindrets/diffview.nvim", optional = true },
-  },
   opts = {
     review_file = "review.md",
     default_severity = "medium",
-    diffview = { enabled = true },
     signs = { enabled = true, priority = 20 },
     picker = { enabled = true, backend = "auto" },
     agent = {
@@ -63,8 +58,8 @@ require("locoreview").setup({})
 
 | Command | Description |
 | --- | --- |
-| `:ReviewDiff` | Open diffview against base branch |
-| `:ReviewFileHistory` | Open diffview file history |
+| `:ReviewPR [base_ref]` | Open PR review buffer against optional base ref |
+| `:ReviewOpenDiff` | Open item-focused diff view at current location |
 | `:ReviewFix` | Run external agent command |
 | `:ReviewRefresh` | Reload signs and quickfix from disk |
 | `:ReviewToggleSigns` | Toggle signs for session |
@@ -78,7 +73,6 @@ require("locoreview").setup({})
 | `keymaps` | `boolean\|table` | `true` |
 | `default_severity` | `"low"\|"medium"\|"high"` | `"medium"` |
 | `default_author` | `string\|nil` | `nil` |
-| `diffview.enabled` | `boolean` | `true` |
 | `signs.enabled` | `boolean` | `true` |
 | `signs.priority` | `number` | `20` |
 | `picker.enabled` | `boolean` | `true` |
@@ -115,7 +109,7 @@ Split parsing into parser.lua and keep store.lua focused on mutation.
 
 ## PR View Keybindings
 
-When you open a PR view with `:ReviewDiff`, these keybindings are available:
+When you open a PR view with `:ReviewPR`, these keybindings are available:
 
 ### File Navigation & State
 
@@ -141,7 +135,7 @@ When you open a PR view with `:ReviewDiff`, these keybindings are available:
 
 | Key | Action |
 | --- | --- |
-| `<leader>a` | Open file action menu at cursor |
+| `d` / `<leader>a` | Open file action menu at cursor |
 | `Delete file` | Remove file immediately (no confirmation prompt) |
 | `Rename file` | Rename file in-place |
 | `Copy file path` | Copy relative file path to clipboard |
@@ -189,6 +183,5 @@ These are particularly useful for reviewing large files with many hunks—use `z
 
 ## Optional Integrations
 
-- Diffview: `:ReviewDiff` and `:ReviewFileHistory` when `diffview.enabled = true` and plugin is installed.
 - Picker backends: auto order is Telescope -> fzf-lua -> snacks -> `vim.ui.select`.
 - Agent: `:ReviewFix` runs `agent.cmd` with an auto-generated prompt over open review items.

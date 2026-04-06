@@ -89,7 +89,6 @@ describe("review commands", function()
           default_severity = "medium",
           default_author = nil,
           diff_only = state.diff_only,
-          diffview = { enabled = true },
           picker = { enabled = true, backend = "auto" },
           agent = { enabled = false, cmd = "agent", open_in_split = true },
         }
@@ -189,11 +188,6 @@ describe("review commands", function()
       populate = function()
       end,
       refresh = function()
-      end,
-    }
-    package.loaded["locoreview.diffview"] = {
-      is_available = function()
-        return false
       end,
     }
     package.loaded["locoreview.picker"] = {

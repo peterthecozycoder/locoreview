@@ -84,10 +84,21 @@ end
 
 local function setup_hl()
   local defs = {
+    -- Cozy header card
+    LocoHeaderBorder      = { link = "NonText" },
+    LocoHeaderTitle       = { link = "Title" },
+    LocoHeaderMood        = { link = "String" },
+    LocoHeaderMascot      = { link = "Special" },
+    LocoHeaderProgress    = { link = "Normal" },
+    LocoHeaderProgressBar = { link = "Statement" },
+    LocoHeaderChecklist   = { link = "Comment" },
+    LocoHeaderQuiet       = { link = "Comment" },
+
     -- File headers
-    LocoFileHeader    = { link = "Title" },
+    LocoFileHeader    = { link = "Normal" },
     LocoFileViewed    = { link = "Comment" },
-    LocoFileDir       = { link = "Comment" },
+    LocoFileDir       = { link = "NonText" },
+    LocoFileName      = { link = "Identifier" },
     LocoFileActive    = { link = "CursorLine" },
 
     -- Hunk headers and spotlight
@@ -109,12 +120,12 @@ local function setup_hl()
     LocoComment       = { link = "DiagnosticVirtualTextInfo" },
     LocoCommentOld    = { link = "DiagnosticVirtualTextWarn" },
     LocoCommentChip   = { link = "DiagnosticVirtualTextInfo" },
-    LocoDiffSep       = { link = "LineNr" },
+    LocoDiffSep       = { link = "NonText" },
     LocoBinaryNote    = { link = "Comment" },
     LocoStatsDim      = { link = "NonText" },
 
     -- Sections and progress
-    LocoSectionHeader  = { link = "Comment" },
+    LocoSectionHeader  = { link = "NonText" },
     LocoProgressBar    = { link = "Statement" },
     LocoTimerWarn      = { link = "DiagnosticSignError" },
     LocoSuccess        = { link = "DiagnosticSignOk" },
@@ -135,7 +146,7 @@ end
 
 _G._locoreview_pr_foldtext = function()
   local n = vim.v.foldend - vim.v.foldstart + 1
-  return "  " .. string.rep("─", 4) .. string.format(" %d lines ", n) .. string.rep("─", 50)
+  return string.format("  .. %d lines folded ..", n)
 end
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
@@ -247,69 +258,183 @@ local MOOD_HL = {
 
 -- ── Rendering ─────────────────────────────────────────────────────────────────
 
-local SEP = string.rep("─", 64)
+local SEP = "  " .. string.rep(".", 24)
 
-local function ambient_label(pct)
-  if pct >= 100 then return "all done ✦"
-  elseif pct >= 81 then return "final polish"
-  elseif pct >= 51 then return "deep pass"
-  elseif pct >= 21 then return "in flow"
-  else return "settling in"
-  end
+local HEADER_PHASES = { "structure", "naming", "edge cases", "tests", "polish" }
+
+local HEADER_QUIET_PHRASES = {
+  "small observations still count",
+  "clean code reveals itself slowly",
+  "one careful pass is enough",
+  "follow the sharp edges first",
+  "leave the code gentler than you found it",
+  "good reviews make future work lighter",
+  "take the next file, not the whole PR",
+}
+
+local function select_header_mood(progress_pct)
+  if progress_pct >= 100 then return "ready to land" end
+  if progress_pct >= 95 then return "quiet pass" end
+  if progress_pct >= 84 then return "tying loose ends" end
+  if progress_pct >= 72 then return "lamplight review" end
+  if progress_pct >= 60 then return "checking the edges" end
+  if progress_pct >= 48 then return "following the thread" end
+  if progress_pct >= 34 then return "deep in the diff" end
+  if progress_pct >= 20 then return "steady pace" end
+  if progress_pct >= 10 then return "mapping the terrain" end
+  return "settling in"
 end
 
-local function render_dashboard_line(file_diffs, review_items, vst)
+local function select_header_mascot(progress_pct, mood)
+  if mood == "ready to land" then return "✦_✦" end
+  if progress_pct >= 82 then return "ᵔᴗᵔ" end
+  if progress_pct >= 56 then return "^_^" end
+  if progress_pct >= 28 then return "•_•" end
+  return "·ᴗ·"
+end
+
+local function select_quiet_phrase(reviewed_count, total_count)
+  local minute_seed = math.floor((state.session_start or os.time()) / 60)
+  local idx = ((reviewed_count + total_count + minute_seed) % #HEADER_QUIET_PHRASES) + 1
+  return HEADER_QUIET_PHRASES[idx]
+end
+
+local function render_phase_checklist(progress_pct)
+  local total = #HEADER_PHASES
+  local complete = math.floor((progress_pct / 100) * total)
+  if progress_pct >= 100 then complete = total end
+  local active_idx = math.min(total, complete + 1)
+
+  local items = {}
+  for i, phase in ipairs(HEADER_PHASES) do
+    local mark = "[ ]"
+    if i <= complete then
+      mark = "[x]"
+    elseif i == active_idx and progress_pct < 100 then
+      mark = "[~]"
+    end
+    table.insert(items, mark .. " " .. phase)
+  end
+  return table.concat(items, "  ")
+end
+
+local function timer_status_text()
+  if state.timer_end == nil then return nil end
+  local remaining = state.timer_end - os.time()
+  if remaining > 0 then
+    return string.format("%02d:%02d left", math.floor(remaining / 60), remaining % 60)
+  end
+  return "time's up"
+end
+
+local function build_header_model(file_diffs, review_items, file_moods)
   local reviewed_count, snoozed_count = 0, 0
   for _, fd in ipairs(file_diffs) do
-    if viewed_state.is_snoozed(fd.file) then
-      snoozed_count = snoozed_count + 1
-    elseif get_entry_mood(vst[fd.file]) == "reviewed" then
+    if file_moods[fd.file] == "reviewed" then
       reviewed_count = reviewed_count + 1
     end
-  end
-  local total = #file_diffs
-  local pct   = total > 0 and math.floor(reviewed_count / total * 100) or 0
-
-  local bar_len = 14
-  local filled  = total > 0 and math.floor(reviewed_count / total * bar_len) or 0
-  local bar     = string.rep("▓", filled) .. string.rep("░", bar_len - filled)
-
-  local branch  = current_branch_name()
-  local ambient = ambient_label(pct)
-  local n_comments = #(review_items or {})
-
-  local parts = {
-    "  " .. branch,
-    ambient,
-    reviewed_count .. " of " .. total .. " reviewed  " .. bar .. "  " .. pct .. "%",
-    n_comments .. " comment" .. (n_comments == 1 and "" or "s"),
-  }
-
-  if snoozed_count > 0 then
-    table.insert(parts, snoozed_count .. " snoozed")
-  end
-
-  if state.rhythm_mode ~= "overview" then
-    table.insert(parts, "[" .. state.rhythm_mode .. "]")
-  end
-
-  if state.timer_end ~= nil then
-    local remaining = state.timer_end - os.time()
-    if remaining > 0 then
-      table.insert(parts, string.format("⏱ %02d:%02d", math.floor(remaining / 60), remaining % 60))
-    else
-      table.insert(parts, "✦ time's up")
+    if viewed_state.is_snoozed(fd.file) then
+      snoozed_count = snoozed_count + 1
     end
   end
 
-  return table.concat(parts, "  ·  ")
+  local total = #file_diffs
+  local pct   = total > 0 and math.floor(reviewed_count / total * 100) or 0
+  local bar_len = 22
+  local filled = total > 0 and math.floor(reviewed_count / total * bar_len) or 0
+  local progress_bar = "[" .. string.rep("=", filled) .. string.rep("-", bar_len - filled) .. "]"
+
+  local mood   = select_header_mood(pct)
+  local mascot = select_header_mascot(pct, mood)
+  local comments = #(review_items or {})
+
+  local mood_parts = {
+    mascot .. " " .. mood,
+    comments .. " comment" .. (comments == 1 and "" or "s"),
+  }
+  if snoozed_count > 0 then
+    table.insert(mood_parts, snoozed_count .. " snoozed")
+  end
+  if state.rhythm_mode ~= "overview" then
+    table.insert(mood_parts, state.rhythm_mode)
+  end
+  local timer_text = timer_status_text()
+  if timer_text then
+    table.insert(mood_parts, timer_text)
+  end
+
+  local branch = current_branch_name()
+  local target = state.base_ref or "working tree"
+
+  return {
+    mascot        = mascot,
+    title_line    = string.format("PR Review  %s -> %s", branch, target),
+    mood_line     = table.concat(mood_parts, "  ·  "),
+    progress_bar  = progress_bar,
+    progress_line = string.format("progress %s  %d%%  (%d/%d reviewed)", progress_bar, pct, reviewed_count, total),
+    checklist_line = "phases  " .. render_phase_checklist(pct),
+    quiet_line    = "quiet  " .. select_quiet_phrase(reviewed_count, total),
+  }
 end
 
--- Gentle section header: ─── label (N) ──────…
+local function pad_right(text, width)
+  if #text >= width then return text end
+  return text .. string.rep(" ", width - #text)
+end
+
+local function render_header_block(model)
+  local content = {
+    model.title_line,
+    model.mood_line,
+    model.progress_line,
+    model.checklist_line,
+    model.quiet_line,
+  }
+  local content_types = {
+    "header_title",
+    "header_mood",
+    "header_progress",
+    "header_checklist",
+    "header_quiet",
+  }
+
+  local inner_w = 68
+  for _, line in ipairs(content) do
+    inner_w = math.max(inner_w, #line)
+  end
+
+  local border = "  +" .. string.rep("-", inner_w + 2) .. "+"
+  local lines  = { border }
+  local meta   = { { type = "header_border" } }
+
+  for i, raw in ipairs(content) do
+    table.insert(lines, "  | " .. pad_right(raw, inner_w) .. " |")
+    local line_meta = {
+      type = content_types[i],
+      content_col = 4,
+      content_len = #raw,
+    }
+    if content_types[i] == "header_mood" then
+      line_meta.mascot_col = 4
+      line_meta.mascot_len = #model.mascot
+    elseif content_types[i] == "header_progress" then
+      local bar_start = raw:find(model.progress_bar, 1, true)
+      if bar_start then
+        line_meta.bar_col = 4 + bar_start - 1
+        line_meta.bar_len = #model.progress_bar
+      end
+    end
+    table.insert(meta, line_meta)
+  end
+
+  table.insert(lines, border)
+  table.insert(meta, { type = "header_border" })
+  return lines, meta
+end
+
+-- Gentle section header
 local function make_section_header(label, count)
-  local inner = "─── " .. label .. " (" .. count .. ")"
-  local fill  = math.max(0, 58 - #inner)
-  return "  " .. inner .. string.rep("─", fill)
+  return string.format("  %s (%d)", label, count)
 end
 
 -- File header text + position metadata for inline highlights.
@@ -372,6 +497,17 @@ local function render(file_diffs, review_items, vst)
   for _, fd in ipairs(file_diffs) do
     file_moods[fd.file] = get_file_effective_mood(fd.file, vst, comment_map, fd)
   end
+
+  local header_model = build_header_model(file_diffs, review_items, file_moods)
+  local header_lines, header_meta = render_header_block(header_model)
+  for i, line in ipairs(header_lines) do
+    table.insert(lines, line)
+    line_map[#lines] = header_meta[i]
+  end
+  table.insert(lines, "")
+  line_map[#lines] = { type = "gap" }
+  table.insert(lines, "")
+  line_map[#lines] = { type = "gap" }
 
   -- Split into reviewed vs to-review
   local first_unreviewed_idx = nil
@@ -470,14 +606,6 @@ local function render(file_diffs, review_items, vst)
     end
   end
 
-  -- ── Dashboard line ────────────────────────────────────────────────────────
-  table.insert(lines, "")
-  line_map[#lines] = { type = "gap" }
-  table.insert(lines, render_dashboard_line(file_diffs, review_items, vst))
-  line_map[#lines] = { type = "progress" }
-  table.insert(lines, "")
-  line_map[#lines] = { type = "gap" }
-
   -- ── TO REVIEW section ─────────────────────────────────────────────────────
   if first_unreviewed_idx then
     local unreviewed_count = #file_diffs - first_unreviewed_idx + 1
@@ -531,7 +659,39 @@ local function apply_highlights(line_map)
     local l0 = lnum - 1
     local t  = meta.type
 
-    if t == "progress" then
+    if t == "header_border" then
+      vim.api.nvim_buf_add_highlight(buf, n, "LocoHeaderBorder", l0, 0, -1)
+
+    elseif t == "header_title" then
+      vim.api.nvim_buf_add_highlight(buf, n, "LocoHeaderTitle", l0, 0, -1)
+
+    elseif t == "header_mood" then
+      vim.api.nvim_buf_add_highlight(buf, n, "LocoHeaderMood", l0, 0, -1)
+      if meta.mascot_col and meta.mascot_len and meta.mascot_len > 0 then
+        vim.api.nvim_buf_set_extmark(buf, n, l0, meta.mascot_col, {
+          end_col  = meta.mascot_col + meta.mascot_len,
+          hl_group = "LocoHeaderMascot",
+          priority = 190,
+        })
+      end
+
+    elseif t == "header_progress" then
+      vim.api.nvim_buf_add_highlight(buf, n, "LocoHeaderProgress", l0, 0, -1)
+      if meta.bar_col and meta.bar_len and meta.bar_len > 0 then
+        vim.api.nvim_buf_set_extmark(buf, n, l0, meta.bar_col, {
+          end_col  = meta.bar_col + meta.bar_len,
+          hl_group = "LocoHeaderProgressBar",
+          priority = 190,
+        })
+      end
+
+    elseif t == "header_checklist" then
+      vim.api.nvim_buf_add_highlight(buf, n, "LocoHeaderChecklist", l0, 0, -1)
+
+    elseif t == "header_quiet" then
+      vim.api.nvim_buf_add_highlight(buf, n, "LocoHeaderQuiet", l0, 0, -1)
+
+    elseif t == "progress" then
       local hl = "LocoProgressBar"
       if state.timer_end then
         local rem = state.timer_end - os.time()
@@ -559,6 +719,15 @@ local function apply_highlights(line_map)
           end_col  = meta.path_col + meta.dir_len,
           hl_group = "LocoFileDir",
           priority = 160,
+        })
+      end
+
+      -- Keep filename as the visual anchor
+      if meta.name_col and meta.name_len and meta.name_len > 0 then
+        vim.api.nvim_buf_set_extmark(buf, n, l0, meta.name_col, {
+          end_col  = meta.name_col + meta.name_len,
+          hl_group = "LocoFileName",
+          priority = 170,
         })
       end
 
@@ -722,9 +891,16 @@ local function apply_active_file_tint(active_file)
 
   for lnum, meta in pairs(state.line_map) do
     if meta.type == "file_header" and meta.file == active_file then
+      local end_col = 0
+      if meta.status_col and meta.status_len then
+        end_col = meta.status_col + meta.status_len
+      elseif meta.name_col and meta.name_len then
+        end_col = meta.name_col + meta.name_len
+      end
       vim.api.nvim_buf_set_extmark(state.buf, tint_ns, lnum - 1, 0, {
-        line_hl_group = "LocoFileActive",
-        priority      = 40,
+        end_col  = end_col > 0 and end_col or nil,
+        hl_group = "LocoFileActive",
+        priority = 40,
       })
     end
   end
@@ -901,10 +1077,10 @@ end
 -- ── Action hint bar ───────────────────────────────────────────────────────────
 
 local HINT_CONTEXTS = {
-  file_header = "  v reviewed   s snooze   <CR> expand   go open   <leader>a actions   ? help",
-  hunk_header = "  c comment   zC collapse   ]c next hunk   v reviewed   s snooze",
-  diff        = "  c comment   C quick note   K show note   v reviewed   ]f next file",
-  default     = "  ]f/[f files   ]c/[c hunks   <leader>F rhythm   R refresh   q close",
+  file_header = "  v reviewed  ·  s snooze  ·  <CR> expand  ·  go open  ·  d/<leader>a actions  ·  ? help",
+  hunk_header = "  c comment  ·  zC collapse  ·  ]c next hunk  ·  v reviewed  ·  s snooze",
+  diff        = "  c comment  ·  C quick note  ·  K show note  ·  v reviewed  ·  ]f next file",
+  default     = "  ]f/[f files  ·  ]c/[c hunks  ·  <leader>F rhythm  ·  R refresh  ·  q close",
 }
 
 local function hint_text_for(meta)
@@ -2506,7 +2682,7 @@ function M.show_help()
     "  c             add review comment at cursor line",
     "  C             quick note (one prompt, low severity)",
     "  K             show full comment popup",
-    "  <leader>a     actions menu (review + maintenance)",
+    "  d / <leader>a actions menu (review + maintenance)",
     "  <leader>R     remove resolved notes (fixed + wontfix)",
     "  go            open source file at cursor",
     "  <leader>T     start / cancel timed review session",

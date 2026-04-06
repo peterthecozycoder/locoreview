@@ -8,9 +8,6 @@ M.defaults = {
   keymaps = true,
   default_severity = "medium",
   default_author = nil,
-  diffview = {
-    enabled = true,
-  },
   signs = {
     enabled = true,
     priority = 20,

@@ -7,7 +7,6 @@ local qf = require("locoreview.qf")
 local store = require("locoreview.store")
 local signs = require("locoreview.signs")
 local ui = require("locoreview.ui")
-local diffview = require("locoreview.diffview")
 local picker = require("locoreview.picker")
 local agent = require("locoreview.agent")
 
@@ -547,42 +546,6 @@ local function command_refresh()
 	ui.notify("refresh complete", vim.log.levels.INFO)
 end
 
-local function ensure_diffview_enabled(cfg)
-	if cfg.diffview and cfg.diffview.enabled == false then
-		ui.notify("diffview integration is disabled", vim.log.levels.ERROR)
-		return false
-	end
-	if not diffview.is_available() then
-		ui.notify("diffview.nvim is not available", vim.log.levels.ERROR)
-		return false
-	end
-	return true
-end
-
-local function command_diff()
-	local cfg = config.get()
-	if not ensure_diffview_enabled(cfg) then
-		return
-	end
-
-	local base = git.base_branch(cfg)
-	ui.prompt_git_ref(base, function(ref)
-		if not ref then
-			return
-		end
-		diffview.open_diff(ref)
-	end)
-end
-
-local function command_file_history()
-	local cfg = config.get()
-	if not ensure_diffview_enabled(cfg) then
-		return
-	end
-
-	diffview.open_file_history()
-end
-
 local function command_picker()
 	local path = review_path_or_notify()
 	if not path then
@@ -716,8 +679,6 @@ function M.register()
 		ui.notify("signs " .. (state and "enabled" or "disabled"), vim.log.levels.INFO)
 	end, {})
 	vim.api.nvim_create_user_command("ReviewRefresh", command_refresh, {})
-	vim.api.nvim_create_user_command("ReviewDiff", command_diff, {})
-	vim.api.nvim_create_user_command("ReviewFileHistory", command_file_history, {})
 	vim.api.nvim_create_user_command("ReviewPicker", command_picker, {})
 	vim.api.nvim_create_user_command("ReviewFix", command_fix, {})
 	vim.api.nvim_create_user_command("ReviewOpenDiff", command_open_diff, {})
