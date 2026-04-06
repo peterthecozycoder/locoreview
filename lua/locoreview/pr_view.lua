@@ -70,6 +70,9 @@ local state = {
   saved_anchor      = nil,
   pending_cursor    = nil,
   pending_anchor    = nil,
+  -- Session-local hide list for files removed via worktree actions while
+  -- reviewing a base_ref diff (base...HEAD doesn't reflect worktree deletes).
+  hidden_files      = {},
   -- Debounce timer for in_progress marking
   _ip_timer         = nil,
 }
@@ -2103,6 +2106,9 @@ local function delete_file_at_cursor()
 
   local rc = vim.fn.delete(path)
   if rc ~= 0 then ui.notify("failed to delete " .. file, vim.log.levels.ERROR); return end
+  if state.base_ref ~= nil then
+    state.hidden_files[file] = true
+  end
   refresh_after_worktree_change()
   ui.notify("deleted " .. file, vim.log.levels.INFO)
 end
@@ -2199,6 +2205,9 @@ local function remove_from_tracking_at_cursor()
   if not root then return end
   vim.fn.system({ "git", "-C", root, "rm", "--cached", "--", file })
   if vim.v.shell_error ~= 0 then ui.notify("git rm --cached failed", vim.log.levels.ERROR); return end
+  if state.base_ref ~= nil then
+    state.hidden_files[file] = true
+  end
   refresh_after_worktree_change()
   ui.notify("removed " .. file .. " from tracking", vim.log.levels.INFO)
 end
@@ -2443,6 +2452,7 @@ end
 local function render_empty_view(desc)
   if not (state.buf and vim.api.nvim_buf_is_valid(state.buf)) then return end
 
+  state.hidden_files      = {}
   state.file_diffs        = {}
   state.line_map          = {}
   state.fold_ranges       = {}
@@ -2551,8 +2561,13 @@ local function sort_file_diffs(file_diffs, vst)
 end
 
 local function do_open_or_refresh(base_ref)
+  local prev_base_ref = state.base_ref
   setup_hl()
   state.base_ref = base_ref
+
+  if state.base_ref == nil or prev_base_ref ~= state.base_ref then
+    state.hidden_files = {}
+  end
 
   local file_diffs, err = git_diff.parse(base_ref)
   if not file_diffs then
@@ -2569,6 +2584,17 @@ local function do_open_or_refresh(base_ref)
   local review_items = load_review_items()
   local vst          = viewed_state.sync(file_diffs)
   file_diffs         = sort_file_diffs(file_diffs, vst)
+
+  if state.base_ref ~= nil and next(state.hidden_files) ~= nil then
+    local filtered = {}
+    for _, fd in ipairs(file_diffs) do
+      if not state.hidden_files[fd.file] then
+        table.insert(filtered, fd)
+      end
+    end
+    file_diffs = filtered
+  end
+
   state.file_diffs   = file_diffs
 
   local is_new_buf = not state.buf or not vim.api.nvim_buf_is_valid(state.buf)
@@ -2598,6 +2624,7 @@ local function do_open_or_refresh(base_ref)
         state.buf = nil; state.tabpage = nil
         state.line_map = {}; state.fold_ranges = {}
         state.file_header_lnums = {}; state.hunk_header_lnums = {}
+        state.hidden_files = {}
         state.saved_cursor = nil; state.saved_anchor = nil
         state.pending_cursor = nil; state.pending_anchor = nil
         state.timer_end = nil
