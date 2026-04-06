@@ -55,6 +55,7 @@ Core:
 - `:ReviewNext`
 - `:ReviewPrev`
 - `:ReviewMarkFixed`
+- `:ReviewClean`
 - `:ReviewReopen`
 - `:ReviewDiff`
 - `:ReviewFileHistory`
@@ -82,6 +83,7 @@ Default keymaps (when enabled):
 - `<leader>rn` `ReviewNext`
 - `<leader>rp` `ReviewPrev`
 - `<leader>rf` `ReviewMarkFixed`
+- `<leader>rc` `ReviewClean`
 - `<leader>rr` `ReviewReopen`
 - `<leader>rd` `ReviewDiff`
 - `<leader>rh` `ReviewFileHistory`

@@ -43,6 +43,7 @@ require("locoreview").setup({})
 | `:ReviewNext` | Jump to next open item |
 | `:ReviewPrev` | Jump to previous open item |
 | `:ReviewMarkFixed` | Transition open item to fixed |
+| `:ReviewClean` | Remove all fixed items from the review file |
 | `:ReviewReopen` | Transition non-open item to open |
 | `:ReviewDiff` | Open diffview against base branch |
 | `:ReviewFileHistory` | Open diffview file history |

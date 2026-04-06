@@ -304,4 +304,40 @@ describe("review commands", function()
     created.ReviewReopen({})
     assert.are.equal("open", state.transition_calls[2])
   end)
+
+  it("cleans fixed items from the review file", function()
+    state.items = {
+      {
+        id = "RV-0001",
+        file = "file.lua",
+        line = 1,
+        severity = "medium",
+        status = "fixed",
+        issue = "x",
+      },
+      {
+        id = "RV-0002",
+        file = "file.lua",
+        line = 2,
+        severity = "medium",
+        status = "open",
+        issue = "y",
+      },
+      {
+        id = "RV-0003",
+        file = "file.lua",
+        line = 3,
+        severity = "medium",
+        status = "blocked",
+        issue = "z",
+      },
+    }
+
+    created.ReviewClean({})
+
+    assert.are.equal(2, #state.saved)
+    for _, item in ipairs(state.saved) do
+      assert.are_not.equal("fixed", item.status)
+    end
+  end)
 end)

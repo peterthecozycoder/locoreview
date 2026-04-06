@@ -500,6 +500,39 @@ local function command_delete()
   end)
 end
 
+local function command_clean()
+  local path = review_path_or_notify()
+  if not path then
+    return
+  end
+
+  local items = load_items(path)
+  if not items then
+    return
+  end
+
+  local next_items = {}
+  local removed = 0
+  for _, item in ipairs(items) do
+    if item.status == "fixed" then
+      removed = removed + 1
+    else
+      table.insert(next_items, item)
+    end
+  end
+
+  if removed == 0 then
+    ui.notify("no fixed review items to clean", vim.log.levels.INFO)
+    return
+  end
+
+  if not save_items(path, next_items) then
+    return
+  end
+  refresh_views(next_items)
+  ui.notify(string.format("removed %d fixed item%s", removed, removed == 1 and "" or "s"), vim.log.levels.INFO)
+end
+
 local function command_refresh()
   local path = review_path_or_notify()
   if not path then
@@ -617,6 +650,7 @@ function M.register()
   end, {})
   vim.api.nvim_create_user_command("ReviewEdit", command_edit, {})
   vim.api.nvim_create_user_command("ReviewDelete", command_delete, {})
+  vim.api.nvim_create_user_command("ReviewClean", command_clean, {})
   vim.api.nvim_create_user_command("ReviewToggleSigns", function()
     if not signs.toggle then
       ui.notify("signs module unavailable", vim.log.levels.ERROR)
