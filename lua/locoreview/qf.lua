@@ -15,6 +15,11 @@ end
 
 function M.populate(items, filter)
   local root = git.repo_root()
+  if not root or root == "" then
+    local err = "could not determine repository root"
+    ui.notify(err, vim.log.levels.ERROR)
+    return nil, err
+  end
   local matcher = filter or default_filter
   local matched = {}
 
@@ -72,7 +77,10 @@ function M.refresh()
     return nil, err
   end
 
-  local entries = M.populate(items, last_filter or default_filter)
+  local entries, populate_err = M.populate(items, last_filter or default_filter)
+  if not entries then
+    return nil, populate_err
+  end
   if vim.api.nvim_win_is_valid(current_win) then
     vim.api.nvim_set_current_win(current_win)
   end

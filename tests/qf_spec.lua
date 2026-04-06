@@ -2,6 +2,8 @@ package.path = "./lua/?.lua;./lua/?/init.lua;" .. package.path
 
 describe("review quickfix", function()
   local captured = nil
+  local notifications = {}
+  local repo_root = "/repo"
   local qf
 
   setup(function()
@@ -14,9 +16,14 @@ describe("review quickfix", function()
       api = {},
       log = { levels = { ERROR = 1 } },
     }
+    package.loaded["locoreview.ui"] = {
+      notify = function(msg)
+        table.insert(notifications, msg)
+      end,
+    }
     package.loaded["locoreview.git"] = {
       repo_root = function()
-        return "/repo"
+        return repo_root
       end,
     }
     qf = require("locoreview.qf")
@@ -24,6 +31,8 @@ describe("review quickfix", function()
 
   before_each(function()
     captured = nil
+    notifications = {}
+    repo_root = "/repo"
   end)
 
   it("populates open items by default with formatted text", function()
@@ -80,5 +89,24 @@ describe("review quickfix", function()
 
     assert.are.equal(2, #entries)
     assert.are.equal(2, #captured.items)
+  end)
+
+  it("returns an error when repository root is unavailable", function()
+    repo_root = nil
+    local entries, err = qf.populate({
+      {
+        id = "RV-0001",
+        file = "a.lua",
+        line = 1,
+        severity = "high",
+        status = "open",
+        issue = "x",
+      },
+    })
+
+    assert.is_nil(entries)
+    assert.are.equal("could not determine repository root", err)
+    assert.are.equal(1, #notifications)
+    assert.are.equal(nil, captured)
   end)
 end)

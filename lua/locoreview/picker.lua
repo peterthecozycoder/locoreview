@@ -52,8 +52,13 @@ end
 
 local function jump_to(item)
   local root = git.repo_root()
+  if not root or root == "" then
+    ui.notify("could not determine repository root", vim.log.levels.ERROR)
+    return false
+  end
   vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. item.file))
   vim.api.nvim_win_set_cursor(0, { item.line, 0 })
+  return true
 end
 
 local function open_select(entries)

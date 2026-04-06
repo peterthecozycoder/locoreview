@@ -11,7 +11,6 @@ local diffview = require("locoreview.diffview")
 local picker = require("locoreview.picker")
 local agent = require("locoreview.agent")
 
-local test = "3"
 local registered = false
 local REVIEW_FILE_INITIAL_CONTENT = "# Review Comments\n\n"
 local ERR_REVIEW_PATH = "unable to resolve review file path"
@@ -47,7 +46,7 @@ local function path_for_buffer()
 	end
 
 	local root = git.repo_root()
-	if vim.startswith(abs, root .. "/") then
+	if root and root ~= "" and vim.startswith(abs, root .. "/") then
 		return abs:sub(#root + 2), abs
 	end
 
@@ -110,6 +109,10 @@ end
 
 local function jump_to_item(item)
 	local root = git.repo_root()
+	if not root or root == "" then
+		ui.notify("could not determine repository root", vim.log.levels.ERROR)
+		return
+	end
 	local abs = root .. "/" .. item.file
 	vim.cmd("edit " .. vim.fn.fnameescape(abs))
 	vim.api.nvim_win_set_cursor(0, { item.line, 0 })
@@ -144,7 +147,10 @@ local function perform_add(start_line, end_line, rel_file, line_ref)
 	if not review_path then
 		return
 	end
-	fs.ensure_file(review_path, REVIEW_FILE_INITIAL_CONTENT)
+	if not fs.ensure_file(review_path, REVIEW_FILE_INITIAL_CONTENT) then
+		ui.notify("failed to create review file", vim.log.levels.ERROR)
+		return
+	end
 
 	ui.prompt_issue(function(issue)
 		if issue == nil then
@@ -654,7 +660,13 @@ local function command_fix()
 		return
 	end
 
-	local ok = agent.run(items, git.repo_root(), path, cfg.agent or {})
+	local root = git.repo_root()
+	if not root or root == "" then
+		ui.notify("could not determine repository root", vim.log.levels.ERROR)
+		return
+	end
+
+	local ok = agent.run(items, root, path, cfg.agent or {})
 	if cfg.agent and cfg.agent.open_in_split == false then
 		if ok then
 			ui.notify("agent command completed", vim.log.levels.INFO)

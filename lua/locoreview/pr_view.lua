@@ -1504,10 +1504,25 @@ local function add_quick_comment_at_cursor()
     local path = fs.review_file_path()
     if not path then ui.notify("unable to find review file", vim.log.levels.ERROR); return end
 
-    store.save(path, next_items)
+    local ok, save_err = store.save(path, next_items)
+    if not ok then
+      ui.notify(save_err or "failed to save review file", vim.log.levels.ERROR)
+      return
+    end
     M.refresh()
     ui.notify("added note " .. new_item.id, vim.log.levels.INFO)
   end)
+end
+
+local STATUS_TRANSITION_ORDER = { "fixed", "blocked", "wontfix", "open" }
+
+local function next_status_for(current_status)
+  local types_mod = require("locoreview.types")
+  local transitions = types_mod.VALID_TRANSITIONS[current_status] or {}
+  for _, status in ipairs(STATUS_TRANSITION_ORDER) do
+    if transitions[status] then return status end
+  end
+  return nil
 end
 
 local function show_comment_popup()
@@ -1586,36 +1601,69 @@ local function show_comment_popup()
   end
 
   vim.keymap.set("n", "e", function()
+    local path = fs.review_file_path()
+    if not path then
+      ui.notify("unable to find review file", vim.log.levels.ERROR)
+      return
+    end
     close_float()
-    vim.cmd("edit " .. vim.fn.fnameescape(fs.review_file_path()))
+    vim.cmd("edit " .. vim.fn.fnameescape(path))
     vim.fn.search("^## " .. item.id)
   end, fk)
 
   vim.keymap.set("n", "s", function()
-    local types_mod = require("locoreview.types")
-    local transitions = types_mod.VALID_TRANSITIONS[item.status] or {}
-    local next_status = nil
-    for s, _ in pairs(transitions) do next_status = s; break end
-    if next_status then
-      local updated = require("locoreview.store").transition(review_items, item.id, next_status)
-      if updated then
-        require("locoreview.store").save(fs.review_file_path(), updated)
-        close_float()
-        M.refresh()
-      end
+    local next_status = next_status_for(item.status)
+    if not next_status then
+      ui.notify("no valid transition from " .. item.status, vim.log.levels.WARN)
+      return
     end
+
+    local updated, transition_err = require("locoreview.store").transition(review_items, item.id, next_status)
+    if not updated then
+      ui.notify(transition_err or "failed to update note status", vim.log.levels.ERROR)
+      return
+    end
+
+    local path = fs.review_file_path()
+    if not path then
+      ui.notify("unable to find review file", vim.log.levels.ERROR)
+      return
+    end
+
+    local ok, save_err = require("locoreview.store").save(path, updated)
+    if not ok then
+      ui.notify(save_err or "failed to save review file", vim.log.levels.ERROR)
+      return
+    end
+
+    close_float()
+    M.refresh()
   end, fk)
 
   vim.keymap.set("n", "d", function()
     vim.ui.select({ "Delete", "Cancel" }, { prompt = "Delete this note?" }, function(choice)
-      if choice == "Delete" then
-        local updated = require("locoreview.store").delete(review_items, item.id)
-        if updated then
-          require("locoreview.store").save(fs.review_file_path(), updated)
-          close_float()
-          M.refresh()
-        end
+      if choice ~= "Delete" then return end
+
+      local updated, delete_err = require("locoreview.store").delete(review_items, item.id)
+      if not updated then
+        ui.notify(delete_err or "failed to delete note", vim.log.levels.ERROR)
+        return
       end
+
+      local path = fs.review_file_path()
+      if not path then
+        ui.notify("unable to find review file", vim.log.levels.ERROR)
+        return
+      end
+
+      local ok, save_err = require("locoreview.store").save(path, updated)
+      if not ok then
+        ui.notify(save_err or "failed to save review file", vim.log.levels.ERROR)
+        return
+      end
+
+      close_float()
+      M.refresh()
     end)
   end, fk)
 
@@ -1717,6 +1765,15 @@ local function absolute_path_for(file)
   return root .. "/" .. file
 end
 
+local function repo_root_or_notify()
+  local root = git.repo_root()
+  if not root or root == "" then
+    ui.notify("could not determine repository root", vim.log.levels.ERROR)
+    return nil
+  end
+  return root
+end
+
 local function open_source_at_cursor()
   local meta = meta_at_cursor()
   if not meta or not meta.file then
@@ -1724,7 +1781,8 @@ local function open_source_at_cursor()
     return
   end
   local line = meta.new_line or meta.old_line or 1
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then return end
   pcall(vim.cmd, "tabprevious")
   vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. meta.file))
   vim.api.nvim_win_set_cursor(0, { line, 0 })
@@ -1737,10 +1795,19 @@ local function open_in_split_at_cursor()
     return
   end
   local line = meta.new_line or meta.old_line or 1
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then return end
   pcall(vim.cmd, "tabprevious")
   vim.cmd("vsplit " .. vim.fn.fnameescape(root .. "/" .. meta.file))
   vim.api.nvim_win_set_cursor(0, { line, 0 })
+end
+
+local function close_loaded_buffer_for(path)
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+  end
 end
 
 local function delete_file_at_cursor()
@@ -1751,6 +1818,7 @@ local function delete_file_at_cursor()
 
   local rc = vim.fn.delete(path)
   if rc ~= 0 then ui.notify("failed to delete " .. file, vim.log.levels.ERROR); return end
+  close_loaded_buffer_for(path)
   M.refresh()
   ui.notify("deleted " .. file, vim.log.levels.INFO)
 end
@@ -1760,7 +1828,8 @@ local function rename_file_at_cursor()
   if not file then return end
   local old_path = absolute_path_for(file)
   if not old_path then ui.notify("could not determine repository root", vim.log.levels.ERROR); return end
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then return end
 
   vim.ui.input({ prompt = "Rename file to: ", default = file }, function(input)
     if not input then return end
@@ -1830,7 +1899,8 @@ end
 local function add_to_gitignore_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then return end
   local f = io.open(root .. "/.gitignore", "a")
   if not f then ui.notify("failed to open .gitignore", vim.log.levels.ERROR); return end
   f:write(file .. "\n")
@@ -1841,7 +1911,8 @@ end
 local function remove_from_tracking_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then return end
   vim.fn.system({ "git", "-C", root, "rm", "--cached", "--", file })
   if vim.v.shell_error ~= 0 then ui.notify("git rm --cached failed", vim.log.levels.ERROR); return end
   M.refresh()
@@ -1851,7 +1922,8 @@ end
 local function reset_file_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then return end
   vim.fn.system({ "git", "-C", root, "checkout", "--", file })
   if vim.v.shell_error ~= 0 then ui.notify("git checkout -- failed", vim.log.levels.ERROR); return end
   M.refresh()
@@ -1877,7 +1949,11 @@ local function reset_hunk_at_cursor()
   if not f then ui.notify("failed to create temp file", vim.log.levels.ERROR); return end
   f:write(patch_text); f:close()
 
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then
+    vim.fn.delete(tmpfile)
+    return
+  end
   vim.fn.system({ "git", "-C", root, "apply", "--reverse", tmpfile })
   vim.fn.delete(tmpfile)
   if vim.v.shell_error ~= 0 then ui.notify("revert hunk failed", vim.log.levels.ERROR); return end
@@ -1889,7 +1965,8 @@ end
 local function stage_file_at_cursor()
   local file = file_path_at_cursor()
   if not file then return end
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then return end
   vim.fn.system({ "git", "-C", root, "add", "--", file })
   if vim.v.shell_error ~= 0 then ui.notify("git add failed", vim.log.levels.ERROR); return end
   M.refresh()
@@ -1915,7 +1992,11 @@ local function stage_hunk_at_cursor()
   if not f then ui.notify("failed to create temp file", vim.log.levels.ERROR); return end
   f:write(patch_text); f:close()
 
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then
+    vim.fn.delete(tmpfile)
+    return
+  end
   vim.fn.system({ "git", "-C", root, "apply", "--cached", tmpfile })
   vim.fn.delete(tmpfile)
   if vim.v.shell_error ~= 0 then ui.notify("git apply --cached failed", vim.log.levels.ERROR); return end
@@ -1927,7 +2008,8 @@ end
 local function open_related_test_file()
   local file = file_path_at_cursor()
   if not file then return end
-  local root = git.repo_root()
+  local root = repo_root_or_notify()
+  if not root then return end
   local base = vim.fn.fnamemodify(file, ":t:r")
   local ext  = vim.fn.fnamemodify(file, ":e")
   local dir  = vim.fn.fnamemodify(file, ":h")
@@ -2073,6 +2155,52 @@ end
 
 -- ── Core render / open logic ──────────────────────────────────────────────────
 
+local function render_empty_view(desc)
+  if not (state.buf and vim.api.nvim_buf_is_valid(state.buf)) then return end
+
+  state.file_diffs        = {}
+  state.line_map          = {}
+  state.fold_ranges       = {}
+  state.file_header_lnums = {}
+  state.hunk_header_lnums = {}
+  state.active_file       = nil
+  state.active_hunk_lnum  = nil
+  state.hunk_ctx_marks    = {}
+
+  local buf = state.buf
+
+  local namespaces = {
+    ns,
+    state.hunk_ctx_ns,
+    state.heat_ns,
+    state.hunk_spot_ns,
+    state.dim_ns,
+    state.tint_ns,
+  }
+  for _, n in ipairs(namespaces) do
+    if n then
+      vim.api.nvim_buf_clear_namespace(buf, n, 0, -1)
+    end
+  end
+
+  vim.api.nvim_buf_set_option(buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "  no " .. desc })
+  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+
+  local win = get_win()
+  if win then
+    vim.api.nvim_win_call(win, function()
+      vim.cmd("setlocal foldmethod=manual")
+      vim.cmd("setlocal foldlevel=99")
+      vim.cmd("normal! zE")
+    end)
+    pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+  end
+
+  update_sticky_header()
+  update_hint_bar(nil)
+end
+
 local function do_render(file_diffs, review_items, vst)
   -- Clear previous hunk context
   if state.hunk_ctx_ns then
@@ -2144,6 +2272,7 @@ local function do_open_or_refresh(base_ref)
   end
   local desc = base_ref and ("relative to " .. base_ref) or "uncommitted changes"
   if #file_diffs == 0 then
+    render_empty_view(desc)
     ui.notify("no " .. desc, vim.log.levels.INFO)
     return
   end
