@@ -9,6 +9,7 @@ local signs = require("locoreview.signs")
 local ui = require("locoreview.ui")
 local picker = require("locoreview.picker")
 local agent = require("locoreview.agent")
+local views = require("locoreview.views")
 
 local registered = false
 local REVIEW_FILE_INITIAL_CONTENT = "# Review Comments\n\n"
@@ -19,14 +20,7 @@ local diff_view = require("locoreview.diff_view")
 local pr_view   = require("locoreview.pr_view")
 
 local function refresh_views(items)
-	qf.refresh()
-	if signs.refresh then
-		signs.refresh(items)
-	end
-	-- Refresh PR view if open to show updated comment badges
-	if pr_view.is_open() then
-		pr_view.refresh()
-	end
+	views.refresh(items)
 end
 
 local function review_path_or_notify()

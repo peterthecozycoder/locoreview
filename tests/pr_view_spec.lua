@@ -349,6 +349,40 @@ describe("pr view", function()
       },
     }
 
+    local function option_accessor(get_target)
+      return setmetatable({}, {
+        __index = function(_, id)
+          return setmetatable({}, {
+            __index = function(_, key)
+              local target = get_target(id)
+              return target and target.options[key] or nil
+            end,
+            __newindex = function(_, key, value)
+              local target = get_target(id)
+              if target then target.options[key] = value end
+            end,
+          })
+        end,
+      })
+    end
+
+    _G.vim.bo = option_accessor(function(id)
+      local buf = id
+      if buf == nil or buf == 0 then
+        local win = wins[current_win]
+        buf = win and win.buf or nil
+      end
+      return buffers[buf]
+    end)
+
+    _G.vim.wo = option_accessor(function(id)
+      local win = id
+      if win == nil or win == 0 then
+        win = current_win
+      end
+      return wins[win]
+    end)
+
     return {
       get_current_buffer = function()
         return wins[current_win] and wins[current_win].buf

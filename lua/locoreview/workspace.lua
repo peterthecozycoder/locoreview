@@ -15,6 +15,7 @@ local fs = require("locoreview.fs")
 local git = require("locoreview.git")
 local store = require("locoreview.store")
 local ui = require("locoreview.ui")
+local views = require("locoreview.views")
 
 -- Workspace-scoped state.  Reset on close.
 local state = {
@@ -35,37 +36,31 @@ local function is_alive()
   return state.tabpage ~= nil and vim.api.nvim_tabpage_is_valid(state.tabpage)
 end
 
-local EXT_MAP = {
-  lua = "lua", py = "python",
-  ts = "typescript", tsx = "typescriptreact",
-  js = "javascript", jsx = "javascriptreact",
-  go = "go", rs = "rust", rb = "ruby",
-  java = "java", c = "c", cpp = "cpp", h = "c",
-  sh = "sh", yaml = "yaml", yml = "yaml",
-  json = "json", md = "markdown",
-}
-
 local function filetype_for(file_path)
   if not file_path then return "" end
-  local ext = file_path:match("%.([^.]+)$")
-  return ext and (EXT_MAP[ext] or "") or ""
+  if not vim.filetype or type(vim.filetype.match) ~= "function" then
+    return ""
+  end
+  local ok, ft = pcall(vim.filetype.match, { filename = file_path })
+  if not ok then return "" end
+  return ft or ""
 end
 
 local function make_scratch(ft)
   local buf = vim.api.nvim_create_buf(false, true) -- unlisted, scratch
-  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
-  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
-  vim.api.nvim_buf_set_option(buf, "swapfile", false)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].swapfile = false
   if ft and ft ~= "" then
-    vim.api.nvim_buf_set_option(buf, "filetype", ft)
+    vim.bo[buf].filetype = ft
   end
   return buf
 end
 
 local function fill_buf(buf, lines)
-  vim.api.nvim_buf_set_option(buf, "modifiable", true)
+  vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  vim.bo[buf].modifiable = false
 end
 
 -- ---------------------------------------------------------------------------
@@ -99,16 +94,7 @@ local function persist_items(items)
 end
 
 local function refresh_global_views(items)
-  local qf = require("locoreview.qf")
-  local signs = require("locoreview.signs")
-  local pr_view = require("locoreview.pr_view")
-  qf.refresh()
-  if signs.refresh then
-    signs.refresh(items)
-  end
-  if pr_view.is_open and pr_view.is_open() and pr_view.refresh then
-    pr_view.refresh()
-  end
+  views.refresh(items)
 end
 
 -- ---------------------------------------------------------------------------
@@ -191,8 +177,8 @@ local function render_current()
   end
 
   local ft = filetype_for(item.file)
-  vim.api.nvim_buf_set_option(state.left_buf, "filetype", ft)
-  vim.api.nvim_buf_set_option(state.right_buf, "filetype", ft)
+  vim.bo[state.left_buf].filetype = ft
+  vim.bo[state.right_buf].filetype = ft
 
   fill_buf(state.left_buf, payload.left_lines)
   fill_buf(state.right_buf, payload.right_lines)
