@@ -4,11 +4,16 @@ local config = require("locoreview.config")
 local git = require("locoreview.git")
 local util = require("locoreview.util")
 
-local GROUP = "locoreview.nvim"
+local GROUP      = "locoreview.nvim"
+local SPEC_GROUP = "locoreview.spec"
 local DEFAULT_PRIORITY = 20
 local STATUS_SIGN = {
-  open = "ReviewOpenSign",
+  open    = "ReviewOpenSign",
   blocked = "ReviewBlockedSign",
+}
+local SPEC_STATUS_SIGN = {
+  unclear = "SpecUnclearSign",
+  blocked = "SpecBlockedSign",
 }
 local ns = nil
 local enabled = true
@@ -32,12 +37,20 @@ function M.setup()
   enabled = not (cfg.signs and cfg.signs.enabled == false)
 
   vim.fn.sign_define("ReviewOpenSign", {
-    text = "R",
+    text   = "R",
     texthl = "DiagnosticSignWarn",
   })
   vim.fn.sign_define("ReviewBlockedSign", {
-    text = "B",
+    text   = "B",
     texthl = "DiagnosticSignHint",
+  })
+  vim.fn.sign_define("SpecUnclearSign", {
+    text   = "U",
+    texthl = "DiagnosticSignWarn",
+  })
+  vim.fn.sign_define("SpecBlockedSign", {
+    text   = "B",
+    texthl = "DiagnosticSignError",
   })
 end
 
@@ -52,6 +65,13 @@ function M.clear()
       vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
     end
   end
+end
+
+function M.clear_spec()
+  if not can_use_signs() then
+    return
+  end
+  vim.fn.sign_unplace(SPEC_GROUP)
 end
 
 function M.refresh(items)
@@ -99,6 +119,52 @@ function M.refresh(items)
             vim.api.nvim_buf_set_extmark(bufnr, ns, line - 1, 0, {
               virt_text = { { "review: " .. util.truncate(item.issue, 60), "Comment" } },
               virt_text_pos = "eol",
+            })
+          end
+        end
+      end
+    end
+  end
+end
+
+-- refresh_spec(items, states) — place SpecUnclearSign / SpecBlockedSign for
+-- spec review items. items is SpecItem[], states is item_id → SpecReviewState.
+function M.refresh_spec(items, states)
+  if not can_use_signs() then
+    return
+  end
+
+  M.clear_spec()
+  if not enabled then
+    return
+  end
+
+  local cfg = config.get()
+  local priority = (cfg.signs and cfg.signs.priority) or DEFAULT_PRIORITY
+
+  -- Index items by source_path to avoid O(buffers × items) inner scan.
+  local by_path = {}
+  for _, item in ipairs(items or {}) do
+    local p = item.source_path
+    if p and p ~= "" then
+      by_path[p] = by_path[p] or {}
+      table.insert(by_path[p], item)
+    end
+  end
+
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      local abs        = vim.api.nvim_buf_get_name(bufnr)
+      local buf_items  = by_path[abs]
+      if buf_items then
+        for _, item in ipairs(buf_items) do
+          local state     = states and states[item.id]
+          local status    = state and state.status or "unreviewed"
+          local sign_name = SPEC_STATUS_SIGN[status]
+          if sign_name then
+            vim.fn.sign_place(0, SPEC_GROUP, sign_name, bufnr, {
+              lnum     = item.line_start,
+              priority = priority,
             })
           end
         end

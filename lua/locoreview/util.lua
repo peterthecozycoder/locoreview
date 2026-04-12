@@ -24,6 +24,14 @@ function M.now_utc()
   return os.date("!%Y-%m-%dT%H:%M:%SZ")
 end
 
+function M.split_lines(text)
+  local lines = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    table.insert(lines, (line:gsub("\r$", "")))
+  end
+  return lines
+end
+
 function M.truncate(str, max)
   local s = tostring(str or ""):gsub("\n.*", "")
   if #s <= max then

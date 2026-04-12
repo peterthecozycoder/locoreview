@@ -30,6 +30,13 @@ M.defaults = {
     action_hints           = true,  -- show bottom hint bar
     rhythm_advance_key     = nil,   -- auto: <Space>, or <Tab> when mapleader is <Space>
   },
+  spec_review = {
+    keymaps        = true,
+    keymap_prefix  = "<leader>s",
+    sidecar_file   = ".git/locoreview_spec_state.json",
+    schema         = "default_spec",
+    auto_detect    = true,
+  },
 }
 
 local function deep_merge(base, override)
@@ -79,6 +86,15 @@ function M.normalize(opts)
 
   if not VALID_PICKER_BACKEND[normalized.picker.backend] then
     return nil, string.format("invalid picker.backend: %s", tostring(normalized.picker.backend))
+  end
+
+  if type(normalized.spec_review) ~= "table" then
+    return nil, string.format("spec_review must be a table, got: %s", type(normalized.spec_review))
+  end
+
+  if type(normalized.spec_review.schema) ~= "string" or normalized.spec_review.schema == "" then
+    return nil, string.format("spec_review.schema must be a non-empty string, got: %s",
+      tostring(normalized.spec_review.schema))
   end
 
   return normalized

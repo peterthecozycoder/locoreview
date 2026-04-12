@@ -13,6 +13,28 @@ local function default_filter(item)
   return item.status == "open"
 end
 
+-- populate_generic(items, format_fn, filter)
+-- Generic quickfix populator. Applies optional `filter` predicate to `items`,
+-- then calls `format_fn(item)` for each matched item to produce a qf entry
+-- ({filename, lnum, text, ...}). Sets the quickfix list and returns entries.
+function M.populate_generic(items, format_fn, filter)
+  local matcher = filter or function() return true end
+  local entries = {}
+  for _, item in ipairs(items or {}) do
+    if matcher(item) then
+      local entry = format_fn(item)
+      if entry then
+        table.insert(entries, entry)
+      end
+    end
+  end
+  vim.fn.setqflist({}, " ", {
+    title = "locoreview.nvim",
+    items = entries,
+  })
+  return entries
+end
+
 function M.populate(items, filter)
   local root = git.repo_root()
   if not root or root == "" then
@@ -41,26 +63,20 @@ function M.populate(items, filter)
     return a.line < b.line
   end)
 
-  local entries = {}
-  for _, item in ipairs(matched) do
+  last_filter = matcher
+  return M.populate_generic(matched, function(item)
     local filename = item.file
     if filename:sub(1, 1) ~= "/" then
       filename = root .. "/" .. filename
     end
-    table.insert(entries, {
+    return {
       filename = filename,
-      lnum = item.line,
+      lnum     = item.line,
       end_lnum = item.end_line,
-      text = string.format("[%s][%s][%s] %s", item.id, item.severity, item.status, util.truncate(item.issue, 80)),
-    })
-  end
-
-  vim.fn.setqflist({}, " ", {
-    title = "locoreview.nvim",
-    items = entries,
-  })
-  last_filter = matcher
-  return entries
+      text     = string.format("[%s][%s][%s] %s",
+        item.id, item.severity, item.status, util.truncate(item.issue, 80)),
+    }
+  end)
 end
 
 function M.refresh()

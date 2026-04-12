@@ -177,14 +177,18 @@ local function open_snacks(entries)
   return true
 end
 
-function M.open(items)
+-- open(items [, entry_maker]) — open the picker over items.
+-- entry_maker(items) → entries[] overrides the default to_entries() builder,
+-- allowing callers (e.g. spec review) to supply custom display fields without
+-- forking the backend detection logic.
+function M.open(items, entry_maker)
   local cfg = config.get()
   if cfg.picker and cfg.picker.enabled == false then
     ui.notify("picker integration is disabled", vim.log.levels.INFO)
     return false
   end
 
-  local entries = to_entries(items)
+  local entries = entry_maker and entry_maker(items) or to_entries(items)
   if #entries == 0 then
     ui.notify("no review items found", vim.log.levels.INFO)
     return false

@@ -43,6 +43,11 @@ Key config fields:
 - `pr_view.action_hints`
 - `pr_view.rhythm_advance_key` (default auto: `<Space>`, or `<Tab>` when
   `mapleader` is `<Space>`)
+- `spec_review.keymaps` (`true`, `false`, or override table)
+- `spec_review.keymap_prefix` (default: `"<leader>s"`)
+- `spec_review.sidecar_file` (default: `".git/locoreview_spec_state.json"`)
+- `spec_review.schema` (default: `"default_spec"`)
+- `spec_review.auto_detect` (default: `true`)
 
 ==============================================================================
 COMMANDS                                                      *locoreview-commands*
@@ -72,6 +77,22 @@ v1.5:
 - `:ReviewToggleSigns`
 - `:ReviewAddDiff`
 
+Spec review:                                               *locoreview-spec-commands*
+- `:ReviewSpecOpen [file]` — start spec review mode on `file` (defaults to
+  current buffer if it is a `.md` file)
+- `:ReviewSpecNext` — advance cursor to next spec item (wraps)
+- `:ReviewSpecPrev` — move cursor to previous spec item (wraps)
+- `:ReviewSpecMark <status>` — set review state for current item; valid states:
+  `unreviewed`, `reviewed`, `unclear`, `blocked`
+- `:ReviewSpecNote` — open `vim.ui.input` to attach or edit a note on the
+  current item (state is unchanged)
+- `:ReviewSpecList` — open quickfix list of all spec items; parse warnings
+  appear as `[WARN]` header entries
+- `:ReviewSpecPicker` — open fuzzy picker over all spec items
+- `:ReviewSpecSummary` — open floating progress summary window
+- `:ReviewSpecSection <name>` — jump to the first item in the named section
+  (e.g. `requirements`, `questions`)
+
 ==============================================================================
 KEYMAPS                                                        *locoreview-keymaps*
 
@@ -95,6 +116,27 @@ Default keymaps (when enabled):
 - `<leader>rs` `ReviewToggleSigns`
 - `<leader>rv` `ReviewOpenDiff`
 - `<leader>rP` `ReviewPR`
+
+Spec review keymaps (default prefix `<leader>s`):        *locoreview-spec-keymaps*
+- `<leader>so` `ReviewSpecOpen`
+- `<leader>sn` `ReviewSpecNext`
+- `<leader>sp` `ReviewSpecPrev`
+- `<leader>sl` `ReviewSpecList`
+- `<leader>sk` `ReviewSpecPicker`
+- `<leader>ss` `ReviewSpecSummary`
+- `<leader>st` `ReviewSpecNote`
+
+Override the prefix via `spec_review.keymap_prefix`. Disable all spec keymaps
+with `spec_review.keymaps = false`. Individual keys can be overridden by
+passing a table, e.g.:
+>
+  spec_review = {
+    keymaps = {
+      spec_open    = "<leader>fo",
+      spec_summary = "<leader>fs",
+    },
+  }
+<
 
 ==============================================================================
 REVIEW FILE FORMAT                                            *locoreview-file-format*
@@ -128,6 +170,70 @@ Rules:
 - Item separator is `---`
 - `issue:` and `requested_change:` are multiline blocks
 - `end_line` and `author` may be blank
+
+==============================================================================
+SPEC REVIEW                                                    *locoreview-spec-review*
+
+Spec review is a second review mode for structured Markdown spec files. It
+parses requirement/goal/question items into reviewable units and tracks per-item
+state in a sidecar JSON file (`.git/locoreview_spec_state.json`). The spec file
+itself is never modified.
+
+Supported section headings (case-insensitive):              *locoreview-spec-schema*
+
+  Section heading           Item prefix
+  -----------------------   -----------
+  Goals / Goal              G#
+  Requirements / Requirement R#
+  Non-goals / Non-goal      N#
+  Open questions / Questions Q#
+  Edge cases / Edge case    E#
+  Acceptance / Done when    A#
+  User flow / Flow          F#
+
+Recognised item form (checkbox required):
+>
+  - [ ] R1: User can do something
+  - [x] Q3: Should the system support X?
+<
+
+Items without a recognised prefix are skipped. Items in unrecognised sections
+are recorded in `unparsed_sections` and a WARN notification is emitted.
+
+Review states:                                              *locoreview-spec-states*
+
+  State       Meaning
+  ----------- ----------------------------------------
+  unreviewed  Not yet looked at (default)
+  reviewed    Considered and accepted as written
+  unclear     Needs clarification before proceeding
+  blocked     Waiting on something external
+
+Valid transitions:
+  unreviewed → reviewed | unclear | blocked
+  reviewed   → unreviewed
+  unclear    → unreviewed | reviewed
+  blocked    → unreviewed
+
+Persistence:                                             *locoreview-spec-persistence*
+
+Review state is stored in `.git/locoreview_spec_state.json`, keyed by
+absolute spec file path then by item ID. The sidecar is gitignored by design
+(same as `locoreview_viewed.json`). It is created on first `:ReviewSpecMark`
+write; no migration is required.
+
+On reload, stale entries (IDs no longer present in the parsed spec, or whose
+`line_start` no longer matches) are silently discarded with a WARN
+notification showing the total count.
+
+Typical workflow:
+  1. Open a Markdown spec and run `:ReviewSpecOpen` (or `<leader>so`).
+  2. A floating summary shows total / by-status / by-type counts.
+  3. Use `:ReviewSpecNext` / `:ReviewSpecPrev` to step through items.
+  4. Run `:ReviewSpecMark reviewed` (or `<leader>sm reviewed`) to accept an
+     item; the cursor automatically advances to the next unreviewed item.
+  5. Run `:ReviewSpecNote` to attach a note without changing status.
+  6. Close Neovim and resume later — state is persisted in the sidecar.
 
 ==============================================================================
 INTEGRATIONS                                                *locoreview-integrations*

@@ -15,9 +15,11 @@ local registered = false
 local REVIEW_FILE_INITIAL_CONTENT = "# Review Comments\n\n"
 local ERR_REVIEW_PATH = "unable to resolve review file path"
 
-local workspace = require("locoreview.workspace")
-local diff_view = require("locoreview.diff_view")
-local pr_view   = require("locoreview.pr_view")
+local workspace    = require("locoreview.workspace")
+local diff_view    = require("locoreview.diff_view")
+local pr_view      = require("locoreview.pr_view")
+local spec_session = require("locoreview.spec_session")
+local spec_view    = require("locoreview.spec_view")
 
 local function refresh_views(items)
 	views.refresh(items)
@@ -666,6 +668,209 @@ local function command_fix()
 	end
 end
 
+-- ── Spec review commands ──────────────────────────────────────────────────────
+
+local function command_spec_open(opts)
+  local path = opts and opts.args and opts.args ~= "" and opts.args or nil
+
+  if not path then
+    local bufname = vim.api.nvim_buf_get_name(0)
+    if bufname:match("%.md$") then
+      path = bufname
+    else
+      ui.notify("no spec file specified and current buffer is not a .md file", vim.log.levels.ERROR)
+      return
+    end
+  end
+
+  path = vim.fn.fnamemodify(path, ":p")
+
+  local result, err = spec_session.open(path)
+  if not result then
+    ui.notify(err, vim.log.levels.ERROR)
+    return
+  end
+
+  for _, w in ipairs(result.warnings or {}) do
+    ui.notify(w, vim.log.levels.WARN)
+  end
+
+  local unparsed = result.unparsed_sections or {}
+  if #unparsed > 0 then
+    ui.notify(string.format(
+      "%d unrecognised section%s skipped: %s",
+      #unparsed, #unparsed == 1 and "" or "s", table.concat(unparsed, ", ")
+    ), vim.log.levels.WARN)
+  end
+
+  local items = result.parse_result and result.parse_result.items or {}
+  ui.notify(string.format("spec review started: %d items", #items), vim.log.levels.INFO)
+
+  local item = spec_session.current_item()
+  if item then
+    if vim.api.nvim_buf_get_name(0) ~= path then
+      vim.cmd("edit " .. vim.fn.fnameescape(path))
+    end
+    vim.api.nvim_win_set_cursor(0, { item.line_start, 0 })
+  end
+
+  spec_view.summary()
+end
+
+local function spec_navigate(nav_fn)
+  if not spec_session.is_open() then
+    ui.notify("no active spec review session", vim.log.levels.INFO)
+    return
+  end
+  local item = nav_fn()
+  if not item then
+    ui.notify("no spec items", vim.log.levels.INFO)
+    return
+  end
+  vim.api.nvim_win_set_cursor(0, { item.line_start, 0 })
+  ui.notify(string.format("%s: %s", item.id, item.text:sub(1, 60)), vim.log.levels.INFO)
+end
+
+local function command_spec_next() spec_navigate(spec_session.next) end
+local function command_spec_prev() spec_navigate(spec_session.prev) end
+
+local function command_spec_mark(opts)
+  if not spec_session.is_open() then
+    ui.notify("no active spec review session", vim.log.levels.INFO)
+    return
+  end
+  local new_status = opts and opts.args and opts.args ~= "" and opts.args or nil
+  if not new_status then
+    ui.notify("usage: ReviewSpecMark <status>", vim.log.levels.ERROR)
+    return
+  end
+  local item = spec_session.current_item()
+  if not item then
+    ui.notify("no current item", vim.log.levels.INFO)
+    return
+  end
+  local ok, err = spec_session.mark(new_status)
+  if not ok then
+    ui.notify(err, vim.log.levels.ERROR)
+    return
+  end
+  ui.notify(string.format("%s -> %s", item.id, new_status), vim.log.levels.INFO)
+  spec_session.next_unreviewed()
+end
+
+local function command_spec_note()
+  if not spec_session.is_open() then
+    ui.notify("no active spec review session", vim.log.levels.INFO)
+    return
+  end
+  local item = spec_session.current_item()
+  if not item then
+    ui.notify("no current item", vim.log.levels.INFO)
+    return
+  end
+  local state = spec_session.current_state()
+  local existing = state and state.note or ""
+  vim.ui.input({
+    prompt  = "Note for " .. item.id .. ": ",
+    default = existing,
+  }, function(value)
+    if value == nil then return end
+    local ok, err = spec_session.set_note(value)
+    if not ok then
+      ui.notify(err, vim.log.levels.ERROR)
+      return
+    end
+    ui.notify("note saved for " .. item.id, vim.log.levels.INFO)
+  end)
+end
+
+local function command_spec_list()
+  if not spec_session.is_open() then
+    ui.notify("no active spec review session", vim.log.levels.INFO)
+    return
+  end
+  local items        = spec_session.all_items()
+  local states       = spec_session.all_states()
+  local parse_result = spec_session.get_parse_result()
+  local warnings     = (parse_result and parse_result.warnings) or {}
+
+  -- Build one combined list: [WARN] header entries first, then item entries.
+  local combined = {}
+  for _, w in ipairs(warnings) do
+    table.insert(combined, { _warn = true, text = "[WARN] " .. w })
+  end
+  for _, item in ipairs(items) do
+    table.insert(combined, item)
+  end
+
+  qf.populate_generic(combined, function(entry)
+    if entry._warn then
+      return { text = entry.text }
+    end
+    local state  = states[entry.id]
+    local status = state and state.status or "unreviewed"
+    return {
+      filename = entry.source_path,
+      lnum     = entry.line_start,
+      end_lnum = entry.line_end,
+      text     = string.format("[%s][%s][%s] %s",
+        entry.id, entry.type, status, entry.text:sub(1, 80)),
+    }
+  end)
+  vim.cmd("copen")
+end
+
+local function command_spec_picker()
+  if not spec_session.is_open() then
+    ui.notify("no active spec review session", vim.log.levels.INFO)
+    return
+  end
+  local items  = spec_session.all_items()
+  local states = spec_session.all_states()
+  picker.open(items, function(entry_items)
+    local entries = {}
+    for _, item in ipairs(entry_items or {}) do
+      local state   = states[item.id]
+      local status  = state and state.status or "unreviewed"
+      local note    = state and state.note or ""
+      local note_str = note ~= "" and (" | " .. note:sub(1, 30)) or ""
+      local display  = string.format("%s [%s][%s]%s %s",
+        item.id, item.type, status, note_str, item.text:sub(1, 60))
+      local ordinal  = string.format("%s %s %s %s %s",
+        item.id, item.type, item.section, status, item.text)
+      table.insert(entries, {
+        value   = item,
+        text    = display,
+        ordinal = ordinal,
+      })
+    end
+    return entries
+  end)
+end
+
+local function command_spec_summary()
+  spec_view.summary()
+end
+
+local function command_spec_section(opts)
+  if not spec_session.is_open() then
+    ui.notify("no active spec review session", vim.log.levels.INFO)
+    return
+  end
+  local section = opts and opts.args and opts.args ~= "" and opts.args or nil
+  if not section then
+    ui.notify("usage: ReviewSpecSection <name>", vim.log.levels.ERROR)
+    return
+  end
+  local item = spec_session.jump_to_section(section)
+  if not item then
+    ui.notify("section not found: " .. section, vim.log.levels.WARN)
+    return
+  end
+  vim.api.nvim_win_set_cursor(0, { item.line_start, 0 })
+  ui.notify("jumped to section: " .. section, vim.log.levels.INFO)
+end
+
 function M.register()
 	if registered then
 		return
@@ -711,6 +916,16 @@ function M.register()
 	vim.api.nvim_create_user_command("ReviewFix", command_fix, {})
 	vim.api.nvim_create_user_command("ReviewOpenDiff", command_open_diff, {})
 	vim.api.nvim_create_user_command("ReviewPR", command_pr, { nargs = "?" })
+
+	vim.api.nvim_create_user_command("ReviewSpecOpen",    command_spec_open,    { nargs = "?" })
+	vim.api.nvim_create_user_command("ReviewSpecNext",    command_spec_next,    {})
+	vim.api.nvim_create_user_command("ReviewSpecPrev",    command_spec_prev,    {})
+	vim.api.nvim_create_user_command("ReviewSpecMark",    command_spec_mark,    { nargs = 1 })
+	vim.api.nvim_create_user_command("ReviewSpecNote",    command_spec_note,    {})
+	vim.api.nvim_create_user_command("ReviewSpecList",    command_spec_list,    {})
+	vim.api.nvim_create_user_command("ReviewSpecPicker",  command_spec_picker,  {})
+	vim.api.nvim_create_user_command("ReviewSpecSummary", command_spec_summary, {})
+	vim.api.nvim_create_user_command("ReviewSpecSection", command_spec_section, { nargs = 1 })
 
 	registered = true
 end

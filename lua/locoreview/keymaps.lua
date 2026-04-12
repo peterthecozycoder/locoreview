@@ -44,24 +44,53 @@ local command_for = {
   pr        = "ReviewPR",
 }
 
-function M.setup(cfg)
-  local keymaps = cfg and cfg.keymaps
-  if keymaps == false then
-    return
-  end
-  if type(keymaps) ~= "table" and keymaps ~= true then
-    return
-  end
+local spec_defaults = {
+  spec_open    = "<leader>so",
+  spec_next    = "<leader>sn",
+  spec_prev    = "<leader>sp",
+  spec_list    = "<leader>sl",
+  spec_picker  = "<leader>sk",
+  spec_summary = "<leader>ss",
+  spec_note    = "<leader>st",
+}
 
-  local merged = vim.tbl_extend("force", defaults, type(keymaps) == "table" and keymaps or {})
+local spec_command_for = {
+  spec_open    = "ReviewSpecOpen",
+  spec_next    = "ReviewSpecNext",
+  spec_prev    = "ReviewSpecPrev",
+  spec_list    = "ReviewSpecList",
+  spec_picker  = "ReviewSpecPicker",
+  spec_summary = "ReviewSpecSummary",
+  spec_note    = "ReviewSpecNote",
+}
+
+local function register_keymaps(merged, lookup)
   for key, lhs in pairs(merged) do
-    local cmd = command_for[key]
+    local cmd = lookup[key]
     if cmd and type(lhs) == "string" and lhs ~= "" then
       vim.keymap.set("n", lhs, "<cmd>" .. cmd .. "<CR>", {
         noremap = true,
         silent = true,
       })
     end
+  end
+end
+
+function M.setup(cfg)
+  local keymaps = cfg and cfg.keymaps
+  if keymaps ~= false and (type(keymaps) == "table" or keymaps == true) then
+    local merged = vim.tbl_extend("force", defaults, type(keymaps) == "table" and keymaps or {})
+    register_keymaps(merged, command_for)
+  end
+
+  local spec_keymaps = cfg and cfg.spec_review and cfg.spec_review.keymaps
+  if spec_keymaps ~= false then
+    local spec_merged = vim.tbl_extend(
+      "force",
+      spec_defaults,
+      type(spec_keymaps) == "table" and spec_keymaps or {}
+    )
+    register_keymaps(spec_merged, spec_command_for)
   end
 end
 
