@@ -3,44 +3,60 @@
 Requirements: Neovim 0.10+, Git for diff review. Run from your repository.
 Setup: require("locoreview").setup({})
 
-COMMENT WORKFLOW                                      *locoreview-comments*
+COMMANDS                                              *locoreview-commands*
 
-:ReviewAdd             Open a multiline editor at the current line.
-:[range]ReviewAddRange Open the same editor for a line range.
-:ReviewShow            Read all comments at the current source line.
-:ReviewEdit            Edit the first comment at the current source line.
-:ReviewList            Open comments in quickfix.
-:ReviewListAll         All comments; optional status=, severity=, file= filters.
-:ReviewPicker          Pick a comment using an optional picker or vim.ui.select.
-:ReviewNext            Next open comment.
-:ReviewPrev            Previous open comment.
-:ReviewOpen            Open or create the Markdown review file.
+:[range]ReviewAdd      Open a multiline editor at this line or range.
+:ReviewShow            Manage all comments at the current source line.
+:ReviewList            Browse open comments across the repository.
+:ReviewPR [base]       Review a diff (see below).
 
-In the editor, write the comment above the optional requested-change heading.
-<C-s> saves; <C-g> cycles severity; <C-c> cancels. <Esc> enters normal mode;
-normal-mode q cancels. A failed save keeps the draft open. Save or discard
-unsaved manual review-file edits before changing comments through the plugin.
+Default maps: <leader>ra add (normal and visual), rv show, rl list, rP diff.
+These are the only global review commands and mappings.
 
-STATUS COMMANDS                                       *locoreview-status*
+COMMENT EDITOR                                        *locoreview-comments*
 
-:ReviewMarkFixed       Resolve the first open comment at the current line.
-:ReviewReopen          Reopen a non-open comment at the current line.
-:ReviewMarkBlocked     Mark the first open comment blocked.
-:ReviewMarkWontfix     Mark the first open comment wontfix.
-:ReviewDelete          Delete a comment after confirmation.
-:ReviewClean           Permanently remove every fixed comment.
-:ReviewRefresh         Reload signs, quickfix and the open PR view.
-:ReviewToggleSigns     Toggle signs for this session.
+Write your comment above the optional requested-change heading.
+  <C-s>     Save.
+  <C-g>     Cycle priority: low, medium, high.
+  <C-t>     Cycle status when editing: open, fixed, blocked, wontfix.
+  <C-c>     Cancel.
+  <Esc>     Enter normal mode; q in normal mode also cancels.
+
+Priority is stored as severity in the Markdown file. Status and priority
+changes in the editor are saved with Ctrl-S. A failed save keeps the draft
+open. Save or discard unsaved manual review-file edits before saving comments.
+
+COMMENT VIEW                                          *locoreview-view*
+
+ReviewShow, ReviewList and K in a diff use the same comment view. Actions
+apply to the comment under the cursor, not the first comment on a source line.
+ReviewShow includes all statuses at that line; ReviewList starts with open
+comments. The title displays scope, filter and count.
+
+  e         Edit text, priority and status in one editor.
+  f         Resolve an open comment; reopen a non-open comment.
+  <C-g>     Cycle and save priority immediately.
+  d         Delete selected comment after confirmation.
+  <CR>      Go to current-revision source (not available for removed lines).
+  ]c / [c   Next / previous comment, wrapping at the ends.
+  /         Search using Neovim's normal buffer search.
+  a         Toggle open/all within the current scope.
+  R         Reload comments, refresh signs and diff.
+  O         Open the Markdown review file.
+  Q         Send visible comments to quickfix.
+  p         Pick from visible comments with an optional picker.
+  S         Toggle source signs.
+  ?         Show shortcuts.
+  q / <Esc> Close.
 
 DIFF REVIEW                                           *locoreview-diff*
 
 :ReviewPR              Staged and unstaged changes against HEAD.
 :ReviewPR {base}       Committed changes from base...HEAD.
-:ReviewAddDiff         Add only on changed lines against the configured base.
 
-PR view keys:
   c         Add a comment on the current diff line.
-  K         Read comments on that line.
+  K         Read and manage comments on that line.
+  L         Browse repository comments.
   ]f / [f   Next / previous file.
   ]c / [c   Next / previous hunk.
   go        Open current-revision source in a new tab.
@@ -58,16 +74,24 @@ CONFIGURATION                                         *locoreview-config*
   default_author    nil
   base_branch       nil (auto-detect for diff-only adds)
   diff_only         false
-  signs            { enabled = true, priority = 20 }
-  picker           { enabled = true, backend = "auto" }
+  signs             { enabled = true, priority = 20 }
+  picker            { enabled = true, backend = "auto" }
   keymaps           true (false disables; a table overrides individual maps)
 
+Keymap overrides: add, add_range (visual), show, list, pr.
+Example: keymaps = { add = "<leader>ca", add_range = "<leader>ca" }
+Use false or an empty string for an individual mapping to disable it.
 Picker backends: auto, telescope, fzf_lua, snacks, none (built-in selection).
-Default maps: <leader>ra add, rA visual range, rv show, rl list, rk picker,
-rn/rp next/previous, re edit, rf fixed, rr reopen, rD delete, ro review file,
-rP PR view, rR refresh, rs signs, rc clean, rb blocked, rw wontfix.
 
 MIGRATION                                             *locoreview-migration*
+
+ReviewAddRange is folded into ReviewAdd; the visual default is <leader>ra.
+ReviewList opens the comment view; use Q there for quickfix or p for a picker.
+Editing, status changes, deletion, navigation, refresh, Markdown-file access
+and sign toggling use view-local shortcuts instead of global commands.
+Use diff_only or the diff view instead of ReviewAddDiff. ReviewClean is removed;
+use the all filter to keep resolved history visible and delete individually.
+Old command aliases and action keymap overrides are not installed.
 
 ReviewShow replaces ReviewOpenDiff (keymap option: show instead of open_diff).
 ReviewFix and agent options are removed. PR timers, moods, rhythm modes,

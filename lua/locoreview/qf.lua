@@ -76,6 +76,7 @@ function M.populate(items, filter)
 end
 
 function M.refresh()
+  if not last_filter or vim.fn.getqflist({ title = 1 }).title ~= "locoreview.nvim" then return end
   local current_win = vim.api.nvim_get_current_win()
   local path = fs.review_file_path()
   if not path then

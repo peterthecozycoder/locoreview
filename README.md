@@ -21,18 +21,44 @@ Or call `require("locoreview").setup({})` from your configuration.
 
 ## Everyday workflow
 
-1. Place your cursor on a line and press `<leader>ra` (`:ReviewAdd`).
-   For a range, select lines visually and press `<leader>rA`.
+1. Press `<leader>ra` (`:ReviewAdd`) on a source line or a visual selection.
 2. Write your comment in the floating editor. A requested change is optional.
-   Press **Ctrl-S** to save, **Ctrl-G** to cycle severity, or **Ctrl-C** to cancel.
+   **Ctrl-S** saves, **Ctrl-G** cycles priority, and **Ctrl-C** cancels.
    Escape returns to normal mode; `q` in normal mode also cancels.
-3. Press `<leader>rv` (`:ReviewShow`) to read comments on the current line,
-   or `<leader>rl` (`:ReviewList`) to browse open comments in quickfix.
-4. Use `<leader>re` to edit a comment and `<leader>rf` to mark it fixed.
+3. Press `<leader>rv` (`:ReviewShow`) to manage comments at the current line,
+   or `<leader>rl` (`:ReviewList`) to browse open comments across the repository.
+4. In either view, move to a comment and press `e` to edit or `f` to resolve it.
+   Press `a` to include resolved comments; `f` reopens a selected resolved comment.
 
-The editor starts with your configured severity and supports multiline text.
+The editor supports multiline text. When editing an existing comment, **Ctrl-T**
+cycles its status (`open`, `fixed`, `blocked`, `wontfix`) before saving.
+Priority is stored as the existing `severity` field (`low`, `medium`, `high`).
 Failed saves keep the draft open. Comments are stored in `review.md`; you decide
 whether to commit it or add it to your repository's ignore rules.
+
+## Comment view
+
+Actions apply to the comment under the cursor, including when several comments
+share the same source line. The same view opens from `K` in a diff.
+The title shows the scope, open/all filter, and comment count.
+
+| Key | Action |
+| --- | --- |
+| `e` | Edit text, priority, and status in one editor |
+| `f` | Resolve an open comment, or reopen a non-open comment |
+| `Ctrl-G` | Cycle and save priority immediately |
+| `d` | Delete the selected comment after confirmation |
+| `Enter` | Go to the source (current-revision comments only) |
+| `]c` / `[c` | Next / previous comment, wrapping at the ends |
+| `/` | Search with Neovim's normal buffer search |
+| `a` | Toggle open/all comments within the current scope |
+| `R` | Reload comments and refresh signs and the diff |
+| `O` | Open the Markdown review file |
+| `Q` | Send the visible comments to quickfix |
+| `p` | Pick from the visible comments with an optional picker |
+| `S` | Toggle source signs |
+| `?` | Show shortcuts |
+| `q` / `Esc` | Close |
 
 ## Review a diff
 
@@ -43,7 +69,8 @@ the merge base. Untracked files are not included in Git's diff.
 | Key | Action |
 | --- | --- |
 | `c` | Add a comment on the diff line |
-| `K` | Read all comments on the diff line |
+| `K` | Read and manage comments on the diff line |
+| `L` | Browse repository comments |
 | `]f` / `[f` | Next / previous file |
 | `]c` / `[c` | Next / previous hunk |
 | `go` | Open the source in a new tab (current-revision lines only) |
@@ -57,27 +84,17 @@ Comments use fixed line numbers; they do not automatically follow later edits.
 
 ## Commands
 
+Only four global commands and four normal-mode shortcuts are installed:
+
 | Command | Default key | Purpose |
 | --- | --- | --- |
-| `ReviewAdd` | `<leader>ra` | Comment on the current line |
-| `ReviewAddRange` | `<leader>rA` (visual) | Comment on selected lines |
-| `ReviewShow` | `<leader>rv` | Read comments at the current line |
-| `ReviewList` | `<leader>rl` | List open comments in quickfix |
-| `ReviewPicker` | `<leader>rk` | Select a comment and jump to its location |
-| `ReviewNext` / `ReviewPrev` | `<leader>rn` / `<leader>rp` | Navigate open comments |
-| `ReviewEdit` | `<leader>re` | Edit the first comment at the current line |
-| `ReviewMarkFixed` | `<leader>rf` | Resolve the first open comment at the current line |
-| `ReviewReopen` | `<leader>rr` | Reopen a resolved comment |
-| `ReviewDelete` | `<leader>rD` | Delete a comment after confirmation |
-| `ReviewOpen` | `<leader>ro` | Open the Markdown file |
+| `[range]ReviewAdd` | `<leader>ra` (normal or visual) | Add a comment |
+| `ReviewShow` | `<leader>rv` | Manage comments at the source line |
+| `ReviewList` | `<leader>rl` | Browse and manage repository comments |
 | `ReviewPR [base_ref]` | `<leader>rP` | Browse a diff |
-| `ReviewRefresh` | `<leader>rR` | Refresh signs, quickfix, and the open diff |
-| `ReviewToggleSigns` | `<leader>rs` | Toggle comment signs |
 
-Additional commands: `ReviewListAll [status=open] [severity=high] [file=path]`,
-`ReviewAddDiff` (only allow changed lines against the configured base),
-`ReviewMarkBlocked`, `ReviewMarkWontfix`, and `ReviewClean` (permanently remove fixed comments).
-The existing `open`, `fixed`, `blocked`, and `wontfix` statuses remain supported.
+For example, `:10,15ReviewAdd` comments on lines 10–15. Management actions and
+navigation live inside the views rather than in global commands or mappings.
 
 ## Configuration
 
@@ -86,7 +103,7 @@ require("locoreview").setup({
   review_file = "review.md",
   default_severity = "medium", -- low, medium, high
   default_author = nil,
-  base_branch = nil,           -- auto-detect for ReviewAddDiff / diff_only
+  base_branch = nil,           -- auto-detect for diff_only
   diff_only = false,
   signs = { enabled = true, priority = 20 },
   picker = { enabled = true, backend = "auto" },
@@ -99,15 +116,24 @@ Use `backend = "none"` for the built-in UI. All integrations are optional.
 
 ## Changes from the earlier interface
 
-Adding and editing now use one editor instead of three prompts. `ReviewShow`
-replaces `ReviewOpenDiff`; the separate suggestion workspace is removed.
-`ReviewPR` opens uncommitted changes immediately instead of asking for a mode.
+Adding and editing use one editor instead of three prompts. `ReviewShow` replaces
+`ReviewOpenDiff` and now opens an interactive comment view. `ReviewList` opens the
+same view for the repository instead of opening quickfix directly.
+
+`ReviewAddRange` is folded into `ReviewAdd`. The visual shortcut is now
+`<leader>ra`; override `add_range` to keep a different visual shortcut.
+`ReviewEdit`, status commands, `ReviewDelete`, navigation, picker, quickfix,
+Markdown-file, refresh, and sign commands are replaced by view-local shortcuts.
+`ReviewAddDiff` is replaced by the `diff_only` setting or commenting in the diff.
+`ReviewClean` is removed; resolved comments remain available through the all
+filter and can be deleted individually. The four commands above have no legacy
+aliases. Keymap override names are now `add`, `add_range`, `show`, `list`, and `pr`.
 
 Timers, rhythm modes, file moods, rewards, viewed-state tracking, source-file
-rename/delete actions, and the external-agent `ReviewFix` command have been removed.
-Remove `agent`, `pr_view`, `fix`, and `open_diff` overrides from older configurations;
-use the `show` keymap override for `ReviewShow`. Existing review files remain readable.
-Requested changes are review text and are never applied automatically as source code.
+rename/delete actions, and the external-agent `ReviewFix` command are removed.
+Remove `agent`, `pr_view`, and old action keymap overrides from older configurations.
+Existing review files remain readable. Requested changes are review text and are
+never applied automatically as source code.
 
 ## Development
 

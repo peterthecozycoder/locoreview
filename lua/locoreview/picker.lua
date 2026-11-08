@@ -52,7 +52,7 @@ end
 
 local function jump_to(item)
   if item.line_ref == "old" then
-    ui.show_comments({ item })
+    require("locoreview.commands").show_at(item.file, item.line, "old")
     return true
   end
   local root = git.repo_root()
@@ -60,6 +60,7 @@ local function jump_to(item)
     ui.notify("could not determine repository root", vim.log.levels.ERROR)
     return false
   end
+  if vim.bo.buftype ~= "" then vim.cmd("tabnew") end
   vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. item.file))
   vim.api.nvim_win_set_cursor(0, { item.line, 0 })
   return true
@@ -196,8 +197,7 @@ function M.open(items)
 
   local backend = (cfg.picker and cfg.picker.backend) or "auto"
   if backend == "none" then
-    ui.notify("picker backend disabled", vim.log.levels.INFO)
-    return false
+    return open_select(entries)
   end
 
   local backends = {

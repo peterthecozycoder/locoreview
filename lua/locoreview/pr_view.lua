@@ -42,7 +42,7 @@ local function show_comments()
     ui.notify("no comments on this line")
     return
   end
-  ui.show_comments(loc.comments)
+  require("locoreview.commands").show_at(loc.file, loc.line, loc.side)
 end
 
 local function attach_maps()
@@ -57,7 +57,8 @@ local function attach_maps()
     end
     require("locoreview.commands").add_at(loc.file, loc.line, nil, loc.side)
   end, "Add comment")
-  map("K", show_comments, "Read comments")
+  map("K", show_comments, "Manage comments")
+  map("L", function() vim.cmd("ReviewList") end, "Browse all review comments")
   map("go", function()
     local loc = location()
     if not loc or not loc.line then return end
@@ -77,7 +78,7 @@ local function attach_maps()
   map("R", M.refresh, "Refresh diff")
   map("q", M.close, "Close review")
   map("?", function()
-    ui.notify("c add comment · K read comments · go source · ]f/[f files · ]c/[c hunks · R refresh · q close")
+    ui.notify("c add comment · K manage comments · L all comments · go source · ]f/[f files · ]c/[c hunks · R refresh · q close")
   end, "Review help")
 end
 

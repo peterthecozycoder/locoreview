@@ -1,63 +1,27 @@
 local M = {}
 
 local defaults = {
-  open = "<leader>ro",
   add = "<leader>ra",
-  add_range = "<leader>rA",
-  list = "<leader>rl",
-  next = "<leader>rn",
-  prev = "<leader>rp",
-  mark_fixed = "<leader>rf",
-  clean = "<leader>rc",
-  reopen = "<leader>rr",
-  edit = "<leader>re",
-  delete = "<leader>rD",
-  mark_blocked = "<leader>rb",
-  mark_wontfix = "<leader>rw",
-  refresh = "<leader>rR",
-  picker = "<leader>rk",
-  toggle_signs = "<leader>rs",
+  add_range = "<leader>ra",
   show = "<leader>rv",
-  pr        = "<leader>rP",
+  list = "<leader>rl",
+  pr = "<leader>rP",
 }
-
-local command_for = {
-  open = "ReviewOpen",
-  add = "ReviewAdd",
-  add_range = "ReviewAddRange",
-  list = "ReviewList",
-  next = "ReviewNext",
-  prev = "ReviewPrev",
-  mark_fixed = "ReviewMarkFixed",
-  clean = "ReviewClean",
-  reopen = "ReviewReopen",
-  edit = "ReviewEdit",
-  delete = "ReviewDelete",
-  mark_blocked = "ReviewMarkBlocked",
-  mark_wontfix = "ReviewMarkWontfix",
-  refresh = "ReviewRefresh",
-  picker = "ReviewPicker",
-  toggle_signs = "ReviewToggleSigns",
-  show = "ReviewShow",
-  pr        = "ReviewPR",
+local commands = {
+  add = "ReviewAdd", add_range = "ReviewAdd", show = "ReviewShow",
+  list = "ReviewList", pr = "ReviewPR",
 }
 
 function M.setup(cfg)
   local keymaps = cfg and cfg.keymaps
-  if keymaps == false then
-    return
-  end
-  if type(keymaps) ~= "table" and keymaps ~= true then
-    return
-  end
-
+  if keymaps == false or (keymaps ~= true and type(keymaps) ~= "table") then return end
   local merged = vim.tbl_extend("force", defaults, type(keymaps) == "table" and keymaps or {})
-  for key, lhs in pairs(merged) do
-    local cmd = command_for[key]
-    if cmd and type(lhs) == "string" and lhs ~= "" then
-      vim.keymap.set(key == "add_range" and "x" or "n", lhs, (key == "add_range" and ":" or "<cmd>") .. cmd .. "<CR>", {
-        noremap = true,
-        silent = true,
+  for key, command in pairs(commands) do
+    local lhs = merged[key]
+    if type(lhs) == "string" and lhs ~= "" then
+      local visual = key == "add_range"
+      vim.keymap.set(visual and "x" or "n", lhs, (visual and ":" or "<cmd>") .. command .. "<CR>", {
+        silent = true, desc = command,
       })
     end
   end

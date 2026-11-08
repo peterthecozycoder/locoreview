@@ -3,625 +3,105 @@ local M = {}
 local config = require("locoreview.config")
 local fs = require("locoreview.fs")
 local git = require("locoreview.git")
-local qf = require("locoreview.qf")
 local store = require("locoreview.store")
-local signs = require("locoreview.signs")
 local ui = require("locoreview.ui")
-local picker = require("locoreview.picker")
 
-local registered = false
-local REVIEW_FILE_INITIAL_CONTENT = "# Review Comments\n\n"
-local ERR_REVIEW_PATH = "unable to resolve review file path"
-
-local pr_view   = require("locoreview.pr_view")
-
-local function refresh_views(items)
-  qf.refresh()
-  if signs.refresh then
-    signs.refresh(items)
-  end
-  -- Refresh PR view if open to show updated comment badges
-  if pr_view.is_open() then
-    pr_view.refresh()
-  end
-end
-
-local function review_path_or_notify()
+local function review_path()
   local path = fs.review_file_path()
-  if path then
-    return path
-  end
-  ui.notify(ERR_REVIEW_PATH, vim.log.levels.ERROR)
-  return nil
+  if not path then ui.notify("unable to resolve review file path", vim.log.levels.ERROR) end
+  return path
 end
 
-local function path_for_buffer()
+local function buffer_path()
   local abs = vim.api.nvim_buf_get_name(0)
-  if abs == "" then
-    return nil, nil, "current buffer has no file path"
+  if abs == "" or vim.bo.buftype ~= "" then
+    ui.notify("place the cursor in a source file", vim.log.levels.WARN)
+    return
   end
-
   local root = git.repo_root()
-  if root and root ~= "" and vim.startswith(abs, root .. "/") then
-    return abs:sub(#root + 2), abs
-  end
-
-  return vim.fn.fnamemodify(abs, ":."), abs
+  if root and vim.startswith(abs, root .. "/") then return abs:sub(#root + 2) end
+  return vim.fn.fnamemodify(abs, ":.")
 end
 
-local function load_items(path)
-  local items, err = store.load(path)
-  if not items then
-    ui.notify(err, vim.log.levels.ERROR)
-    return nil
-  end
-  return items
+function M.refresh(items)
+  require("locoreview.signs").refresh(items)
+  require("locoreview.qf").refresh()
+  require("locoreview.pr_view").refresh()
 end
 
-local function save_items(path, items)
-  local ok, err = store.save(path, items)
-  if not ok then
-    ui.notify(err, vim.log.levels.ERROR)
-    return false
-  end
-  return true
-end
-
-local function item_matches_location(item, rel_file, line)
-  if item.file ~= rel_file or item.line_ref == "old" then
-    return false
-  end
-  if item.end_line then
-    return line >= item.line and line <= item.end_line
-  end
-  return item.line == line
-end
-
-local function find_item(items, rel_file, line, status_pred)
-  local lnum = tonumber(line) or 0
-  for _, item in ipairs(items) do
-    if (not status_pred or status_pred(item.status)) and item_matches_location(item, rel_file, lnum) then
-      return item
-    end
-  end
-end
-
-local function sort_open_items(items)
-  local open = {}
-  for _, item in ipairs(items) do
-    if item.status == "open" and item.line_ref ~= "old" then
-      table.insert(open, item)
-    end
-  end
-
-  table.sort(open, function(a, b)
-    if a.file == b.file then
-      return a.line < b.line
-    end
-    return a.file < b.file
-  end)
-  return open
-end
-
-local function jump_to_item(item)
-  local root = git.repo_root()
-  if not root or root == "" then
-    ui.notify("could not determine repository root", vim.log.levels.ERROR)
-    return
-  end
-  local abs = root .. "/" .. item.file
-  vim.cmd("edit " .. vim.fn.fnameescape(abs))
-  vim.api.nvim_win_set_cursor(0, { item.line, 0 })
-end
-
-local function command_open()
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-
-  if not fs.ensure_file(path, REVIEW_FILE_INITIAL_CONTENT) then
-    ui.notify("failed to create review file", vim.log.levels.ERROR)
-    return
-  end
-
-  vim.cmd("edit " .. vim.fn.fnameescape(path))
-end
-
-local function perform_add(start_line, end_line, rel_file, line_ref)
+function M.add_at(file, line, end_line, line_ref)
+  local path = review_path()
+  if not path then return end
   local cfg = config.get()
-  if not rel_file then
-    local path_err
-    rel_file, _, path_err = path_for_buffer()
-    if not rel_file then
-      ui.notify(path_err, vim.log.levels.ERROR)
-      return
-    end
-  end
-
-  local review_path = review_path_or_notify()
-  if not review_path then
-    return
-  end
-  ui.edit_comment({ severity = cfg.default_severity, file = rel_file, line = start_line }, function(fields)
-    if not fs.ensure_file(review_path, REVIEW_FILE_INITIAL_CONTENT) then
+  return ui.edit_comment({ severity = cfg.default_severity, file = file, line = line }, function(fields)
+    if not fs.ensure_file(path, "# Review Comments\n\n") then
       ui.notify("failed to create review file", vim.log.levels.ERROR)
       return false
     end
-    local items = load_items(review_path)
-    if not items then return false end
-    fields.file = rel_file
-    fields.line = start_line
-    fields.end_line = end_line
-    fields.line_ref = line_ref
-    fields.status = "open"
-    fields.author = cfg.default_author
+    local items, err = store.load(path)
+    if not items then
+      ui.notify(err, vim.log.levels.ERROR)
+      return false
+    end
+    fields.file, fields.line, fields.end_line = file, line, end_line
+    fields.line_ref, fields.status, fields.author = line_ref, "open", cfg.default_author
     local next_items, inserted = store.insert(items, fields)
     if not next_items then
       ui.notify(inserted, vim.log.levels.ERROR)
       return false
     end
-    if not save_items(review_path, next_items) then return false end
-    refresh_views(next_items)
-    ui.notify("added " .. inserted.id, vim.log.levels.INFO)
+    local ok, save_err = store.save(path, next_items)
+    if not ok then
+      ui.notify(save_err, vim.log.levels.ERROR)
+      return false
+    end
+    M.refresh(next_items)
+    ui.notify("added " .. inserted.id)
     return true
   end)
 end
 
-local function ensure_diff_line(file, line)
+local function add(opts)
+  local file = buffer_path()
+  if not file then return end
+  local line = opts.range > 0 and opts.line1 or vim.api.nvim_win_get_cursor(0)[1]
+  local end_line = opts.range > 0 and opts.line2 or nil
   local cfg = config.get()
-  local base = git.base_branch(cfg)
-  if not git.is_line_changed(file, line, base) then
-    ui.notify("current line is not changed from base diff", vim.log.levels.ERROR)
-    return false
-  end
-  return true
-end
-
-local function ensure_diff_range(file, start_line, end_line)
-  local cfg = config.get()
-  local base = git.base_branch(cfg)
-  local has_changed_lines = type(git.changed_lines) == "function"
-  local ranges = has_changed_lines and git.changed_lines(file, base) or nil
-  if has_changed_lines and type(ranges) ~= "table" then
-    ranges = {}
-  end
-  for line = start_line, end_line do
-    local lnum = tonumber(line) or 0
-    local changed = false
-    if has_changed_lines then
-      for _, r in ipairs(ranges) do
-        if lnum >= r.start and lnum <= r["end"] then
-          changed = true
-          break
-        end
+  if cfg.diff_only then
+    local ranges = git.changed_lines(file, git.base_branch(cfg)) or {}
+    for lnum = line, end_line or line do
+      local changed = false
+      for _, range in ipairs(ranges) do
+        if lnum >= range.start and lnum <= range["end"] then changed = true; break end
       end
-    elseif type(git.is_line_changed) == "function" then
-      changed = git.is_line_changed(file, lnum, base)
-    end
-    if not changed then
-      ui.notify("visual selection contains unchanged lines from base diff", vim.log.levels.ERROR)
-      return false
-    end
-  end
-  return true
-end
-
-local function command_add()
-  local rel_file, _, err = path_for_buffer()
-  if not rel_file then
-    ui.notify(err, vim.log.levels.ERROR)
-    return
-  end
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  local cfg = config.get()
-  if cfg.diff_only and not ensure_diff_line(rel_file, line) then
-    return
-  end
-  perform_add(line, nil, rel_file)
-end
-
-local function command_add_range(opts)
-  local rel_file, _, err = path_for_buffer()
-  if not rel_file then
-    ui.notify(err, vim.log.levels.ERROR)
-    return
-  end
-
-  local start_line = opts and opts.line1 or vim.fn.getpos("'<")[2]
-  local end_line = opts and opts.line2 or vim.fn.getpos("'>")[2]
-  if start_line == 0 or end_line == 0 then
-    ui.notify("visual selection not found", vim.log.levels.ERROR)
-    return
-  end
-  if end_line < start_line then
-    start_line, end_line = end_line, start_line
-  end
-  local cfg = config.get()
-  if cfg.diff_only and not ensure_diff_range(rel_file, start_line, end_line) then
-    return
-  end
-  perform_add(start_line, end_line, rel_file)
-end
-
-local function command_add_diff()
-  local rel_file, _, err = path_for_buffer()
-  if not rel_file then
-    ui.notify(err, vim.log.levels.ERROR)
-    return
-  end
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  if not ensure_diff_line(rel_file, line) then
-    return
-  end
-  perform_add(line, nil, rel_file)
-end
-
-local function command_list()
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-  fs.ensure_file(path, REVIEW_FILE_INITIAL_CONTENT)
-
-  local items = load_items(path)
-  if not items then
-    return
-  end
-
-  qf.populate(items, function(item)
-    return item.status == "open"
-  end)
-  vim.cmd("copen")
-end
-
-local function parse_list_all_args(arg_string)
-  local out = {}
-  for token in tostring(arg_string or ""):gmatch("%S+") do
-    local key, value = token:match("^(%w+)=([^=]+)$")
-    if key and value then
-      out[key] = value
-    end
-  end
-  return out
-end
-
-local function command_list_all(opts)
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-  fs.ensure_file(path, REVIEW_FILE_INITIAL_CONTENT)
-
-  local items = load_items(path)
-  if not items then
-    return
-  end
-
-  local filters = parse_list_all_args(opts.args)
-  qf.populate(items, function(item)
-    if filters.status and item.status ~= filters.status then
-      return false
-    end
-    if filters.severity and item.severity ~= filters.severity then
-      return false
-    end
-    if filters.file and item.file ~= filters.file then
-      return false
-    end
-    return true
-  end)
-  vim.cmd("copen")
-end
-
-local function jump_relative(direction)
-  local rel_file, _, err = path_for_buffer()
-  if not rel_file then
-    ui.notify(err, vim.log.levels.ERROR)
-    return
-  end
-
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-
-  local items = load_items(path)
-  if not items then
-    return
-  end
-  local open_items = sort_open_items(items)
-  if #open_items == 0 then
-    ui.notify("no open review items", vim.log.levels.INFO)
-    return
-  end
-
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  if direction > 0 then
-    for _, item in ipairs(open_items) do
-      if item.file > rel_file or (item.file == rel_file and item.line > line) then
-        jump_to_item(item)
+      if not changed then
+        ui.notify("selection contains unchanged lines from base diff", vim.log.levels.WARN)
         return
       end
     end
-    jump_to_item(open_items[1])
-    return
   end
-
-  for i = #open_items, 1, -1 do
-    local item = open_items[i]
-    if item.file < rel_file or (item.file == rel_file and item.line < line) then
-      jump_to_item(item)
-      return
-    end
-  end
-  jump_to_item(open_items[#open_items])
+  M.add_at(file, line, end_line)
 end
 
-local function transition_item(new_status)
-  local rel_file, _, err = path_for_buffer()
-  if not rel_file then
-    ui.notify(err, vim.log.levels.ERROR)
-    return
-  end
-
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-
-  local items = load_items(path)
-  if not items then
-    return
-  end
-
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  local target
-  if new_status == "open" then
-    target = find_item(items, rel_file, line, function(s)
-      return s ~= "open"
-    end)
-  else
-    target = find_item(items, rel_file, line, function(s)
-      return s == "open"
-    end)
-  end
-  if not target then
-    ui.notify("review item not found at current location", vim.log.levels.ERROR)
-    return
-  end
-
-  local next_items, transition_err = store.transition(items, target.id, new_status)
-  if not next_items then
-    ui.notify(transition_err, vim.log.levels.ERROR)
-    return
-  end
-
-  if not save_items(path, next_items) then
-    return
-  end
-  refresh_views(next_items)
-  ui.notify(string.format("%s -> %s", target.id, new_status), vim.log.levels.INFO)
-end
-
-local function command_edit()
-  local rel_file, _, err = path_for_buffer()
-  if not rel_file then
-    ui.notify(err, vim.log.levels.ERROR)
-    return
-  end
-
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-  local items = load_items(path)
-  if not items then
-    return
-  end
-
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  local target = find_item(items, rel_file, line)
-  if not target then
-    ui.notify("review item not found at current location", vim.log.levels.ERROR)
-    return
-  end
-
-  ui.edit_comment(target, function(fields)
-    -- Reload after editing so other comments added while the editor was open survive.
-    local latest = load_items(path)
-    if not latest then return false end
-    local next_items, update_err = store.update(latest, target.id, fields)
-    if not next_items then
-      ui.notify(update_err, vim.log.levels.ERROR)
-      return false
-    end
-    if not save_items(path, next_items) then return false end
-    refresh_views(next_items)
-    ui.notify("updated " .. target.id, vim.log.levels.INFO)
-    return true
-  end)
-end
-
-local function command_delete()
-  local rel_file, _, err = path_for_buffer()
-  if not rel_file then
-    ui.notify(err, vim.log.levels.ERROR)
-    return
-  end
-
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-  local items = load_items(path)
-  if not items then
-    return
-  end
-
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  local target = find_item(items, rel_file, line)
-  if not target then
-    ui.notify("review item not found at current location", vim.log.levels.ERROR)
-    return
-  end
-
-  ui.prompt_confirm("Delete?", function(confirmed)
-    if not confirmed then
-      return
-    end
-    local next_items, delete_err = store.delete(items, target.id)
-    if not next_items then
-      ui.notify(delete_err, vim.log.levels.ERROR)
-      return
-    end
-    if not save_items(path, next_items) then
-      return
-    end
-    refresh_views(next_items)
-    ui.notify("deleted " .. target.id, vim.log.levels.INFO)
-  end)
-end
-
-local function command_clean()
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-
-  local items = load_items(path)
-  if not items then
-    return
-  end
-
-  local next_items = {}
-  local removed = 0
-  for _, item in ipairs(items) do
-    if item.status == "fixed" then
-      removed = removed + 1
-    else
-      table.insert(next_items, item)
-    end
-  end
-
-  if removed == 0 then
-    ui.notify("no fixed review items to clean", vim.log.levels.INFO)
-    return
-  end
-
-  if not save_items(path, next_items) then
-    return
-  end
-  refresh_views(next_items)
-  ui.notify(string.format("removed %d fixed item%s", removed, removed == 1 and "" or "s"), vim.log.levels.INFO)
-end
-
-local function command_refresh()
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-
-  local items = load_items(path)
-  if not items then
-    return
-  end
-
-  refresh_views(items)
-  ui.notify("refresh complete", vim.log.levels.INFO)
-end
-
-local function command_picker()
-  local path = review_path_or_notify()
-  if not path then
-    return
-  end
-
-  local items = load_items(path)
-  if not items then
-    return
-  end
-
-  picker.open(items)
-end
-
-local function command_show()
-  local path = review_path_or_notify()
+function M.show_at(file, line, side)
+  local path = review_path()
   if not path then return end
-  local items = load_items(path)
-  if not items then return end
-  local rel_file, _, err = path_for_buffer()
-  if not rel_file then
-    ui.notify(err, vim.log.levels.ERROR)
-    return
-  end
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  local matches = {}
-  for _, item in ipairs(items) do
-    if item.line_ref ~= "old" and item_matches_location(item, rel_file, line) then
-      table.insert(matches, item)
-    end
-  end
-  ui.show_comments(matches)
-end
-
-local function command_pr(opts)
-  local base_ref = opts and opts.args and opts.args ~= "" and opts.args or nil
-  pr_view.open(base_ref)
+  return require("locoreview.comment_view").open(path, { file = file, line = line, side = side or "new" })
 end
 
 function M.register()
-  if registered then
-    return
-  end
-
-  vim.api.nvim_create_user_command("ReviewOpen", command_open, {})
-  vim.api.nvim_create_user_command("ReviewAdd", command_add, {})
-  vim.api.nvim_create_user_command("ReviewAddRange", command_add_range, { range = true })
-  vim.api.nvim_create_user_command("ReviewAddDiff", command_add_diff, {})
-  vim.api.nvim_create_user_command("ReviewList", command_list, {})
-  vim.api.nvim_create_user_command("ReviewListAll", command_list_all, { nargs = "*" })
-  vim.api.nvim_create_user_command("ReviewNext", function()
-    jump_relative(1)
-  end, {})
-  vim.api.nvim_create_user_command("ReviewPrev", function()
-    jump_relative(-1)
-  end, {})
-  vim.api.nvim_create_user_command("ReviewMarkFixed", function()
-    transition_item("fixed")
-  end, {})
-  vim.api.nvim_create_user_command("ReviewReopen", function()
-    transition_item("open")
-  end, {})
-  vim.api.nvim_create_user_command("ReviewMarkBlocked", function()
-    transition_item("blocked")
-  end, {})
-  vim.api.nvim_create_user_command("ReviewMarkWontfix", function()
-    transition_item("wontfix")
-  end, {})
-  vim.api.nvim_create_user_command("ReviewEdit", command_edit, {})
-  vim.api.nvim_create_user_command("ReviewDelete", command_delete, {})
-  vim.api.nvim_create_user_command("ReviewClean", command_clean, {})
-  vim.api.nvim_create_user_command("ReviewToggleSigns", function()
-    if not signs.toggle then
-      ui.notify("signs module unavailable", vim.log.levels.ERROR)
-      return
-    end
-    local state = signs.toggle()
-    ui.notify("signs " .. (state and "enabled" or "disabled"), vim.log.levels.INFO)
-  end, {})
-  vim.api.nvim_create_user_command("ReviewRefresh", command_refresh, {})
-  vim.api.nvim_create_user_command("ReviewPicker", command_picker, {})
-  vim.api.nvim_create_user_command("ReviewShow", command_show, {})
-  vim.api.nvim_create_user_command("ReviewPR", command_pr, { nargs = "?" })
-
-  registered = true
-end
-
--- Called by pr_view.lua to open the ReviewAdd flow for a specific location
--- without requiring the user to be in the source file.
-function M.add_at(rel_file, start_line, end_line, line_ref)
-  perform_add(start_line, end_line, rel_file, line_ref)
+  vim.api.nvim_create_user_command("ReviewAdd", add, { range = true, desc = "Add a comment on this line or range" })
+  vim.api.nvim_create_user_command("ReviewShow", function()
+    local file = buffer_path()
+    if file then M.show_at(file, vim.api.nvim_win_get_cursor(0)[1]) end
+  end, { desc = "Read and manage comments on this line" })
+  vim.api.nvim_create_user_command("ReviewList", function()
+    local path = review_path()
+    if path then require("locoreview.comment_view").open(path) end
+  end, { desc = "Browse and manage review comments" })
+  vim.api.nvim_create_user_command("ReviewPR", function(opts)
+    require("locoreview.pr_view").open(opts.args ~= "" and opts.args or nil)
+  end, { nargs = "?", desc = "Review a diff" })
 end
 
 return M
