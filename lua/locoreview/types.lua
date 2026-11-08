@@ -45,12 +45,12 @@ function M.new_item(fields)
     return nil, "fields must be a table"
   end
 
-  if not fields.file or fields.file == "" then
+  if type(fields.file) ~= "string" or fields.file == "" then
     return nil, "missing required field: file"
   end
 
   local line = tonumber(fields.line)
-  if not line then
+  if not line or line < 1 or line % 1 ~= 0 then
     return nil, "missing required field: line"
   end
 
@@ -62,8 +62,16 @@ function M.new_item(fields)
     return nil, "missing or invalid required field: status"
   end
 
-  if not fields.issue or fields.issue == "" then
+  if type(fields.issue) ~= "string" or util.trim(fields.issue) == "" then
     return nil, "missing required field: issue"
+  end
+
+  local end_line = tonumber(fields.end_line)
+  if fields.end_line ~= nil and (not end_line or end_line < line or end_line % 1 ~= 0) then
+    return nil, "end_line must be an integer at or after line"
+  end
+  if fields.requested_change ~= nil and type(fields.requested_change) ~= "string" then
+    return nil, "requested_change must be a string"
   end
 
   local created_at = fields.created_at or util.now_utc()

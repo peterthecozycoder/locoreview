@@ -72,7 +72,7 @@ function M.refresh(items)
 
   local per_file = {}
   for _, item in ipairs(last_items) do
-    if item.status == "open" or item.status == "blocked" then
+    if item.line_ref ~= "old" and (item.status == "open" or item.status == "blocked") then
       local abs = root .. "/" .. item.file
       per_file[abs] = per_file[abs] or {}
       for lnum = item.line, (item.end_line or item.line) do

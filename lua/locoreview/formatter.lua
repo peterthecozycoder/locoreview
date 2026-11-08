@@ -10,6 +10,11 @@ local function append_block(lines, key, text)
   local value = tostring(text or "")
   if value ~= "" then
     for line in (value .. "\n"):gmatch("([^\n]*)\n") do
+      -- Escape structural markers so multiline Markdown cannot split an item.
+      if line:match("^\\") or line:match("^%-%-%-%s*$")
+        or line:match("^##%s+RV%-%d+%s*$") or line:match("^requested_change:%s*$") then
+        line = "\\" .. line
+      end
       table.insert(lines, line)
     end
   end

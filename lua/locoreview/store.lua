@@ -6,7 +6,6 @@ local parser = require("locoreview.parser")
 local types = require("locoreview.types")
 local util = require("locoreview.util")
 
-
 function M.load(path)
   local target = path or fs.review_file_path()
   if not target then
@@ -27,10 +26,25 @@ function M.save(path, items)
     return nil, "unable to resolve review file path"
   end
 
+  -- Never overwrite unsaved manual edits to the review file.
+  if type(vim) == "table" and vim.fn and vim.fn.bufnr then
+    local buf = vim.fn.bufnr(target)
+    if buf >= 0 and vim.bo[buf].modified then
+      return nil, "save or discard changes to the review buffer first"
+    end
+  end
+
   local content = formatter.format(items or {})
   local ok = fs.write(target, content)
   if not ok then
     return nil, "failed to write review file"
+  end
+  if type(vim) == "table" and vim.fn and vim.fn.bufnr then
+    local buf = vim.fn.bufnr(target)
+    if buf >= 0 and vim.api.nvim_buf_is_loaded(buf) then
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(content, "\n", { plain = true }))
+      vim.bo[buf].modified = false
+    end
   end
   return true
 end

@@ -1,150 +1,78 @@
-*locoreview.nvim*  Local-first code review comments for Neovim
+*locoreview.txt* Local code review comments for Neovim
 
-locoreview.nvim lets you add, navigate, and resolve lightweight review comments in a
-repo-local markdown file.
+Requirements: Neovim 0.10+, Git for diff review. Run from your repository.
+Setup: require("locoreview").setup({})
 
-==============================================================================
-OVERVIEW                                                        *locoreview-overview*
+COMMENT WORKFLOW                                      *locoreview-comments*
 
-- Structured markdown file format (`review.md` by default)
-- Local-first workflow for review comments
-- Quickfix + picker navigation
-- Optional integrations (picker backends, signs, agent command)
+:ReviewAdd             Open a multiline editor at the current line.
+:[range]ReviewAddRange Open the same editor for a line range.
+:ReviewShow            Read all comments at the current source line.
+:ReviewEdit            Edit the first comment at the current source line.
+:ReviewList            Open comments in quickfix.
+:ReviewListAll         All comments; optional status=, severity=, file= filters.
+:ReviewPicker          Pick a comment using an optional picker or vim.ui.select.
+:ReviewNext            Next open comment.
+:ReviewPrev            Previous open comment.
+:ReviewOpen            Open or create the Markdown review file.
 
-==============================================================================
-INSTALLATION                                                  *locoreview-install*
+In the editor, write the comment above the optional requested-change heading.
+<C-s> saves; <C-g> cycles severity; <C-c> cancels. <Esc> enters normal mode;
+normal-mode q cancels. A failed save keeps the draft open. Save or discard
+unsaved manual review-file edits before changing comments through the plugin.
 
-With lazy.nvim:
->
-  {
-    "yourname/locoreview.nvim",
-    opts = {},
-  }
-<
+STATUS COMMANDS                                       *locoreview-status*
 
-==============================================================================
-SETUP                                                             *locoreview-setup*
+:ReviewMarkFixed       Resolve the first open comment at the current line.
+:ReviewReopen          Reopen a non-open comment at the current line.
+:ReviewMarkBlocked     Mark the first open comment blocked.
+:ReviewMarkWontfix     Mark the first open comment wontfix.
+:ReviewDelete          Delete a comment after confirmation.
+:ReviewClean           Permanently remove every fixed comment.
+:ReviewRefresh         Reload signs, quickfix and the open PR view.
+:ReviewToggleSigns     Toggle signs for this session.
 
-Minimal setup:
->
-  require("locoreview").setup({})
-<
+DIFF REVIEW                                           *locoreview-diff*
 
-Key config fields:
-- `review_file` (default: `"review.md"`)
-- `default_severity` (`"low"`, `"medium"`, `"high"`)
-- `keymaps` (`true`, `false`, or override table)
-- `signs.enabled`, `signs.priority`
-- `picker.enabled`, `picker.backend`
-- `diff_only`
-- `agent.enabled`, `agent.cmd`, `agent.open_in_split`
-- `pr_view.auto_advance_on_viewed`, `pr_view.micro_rewards`
-- `pr_view.risky_threshold`, `pr_view.generated_patterns`
-- `pr_view.action_hints`
-- `pr_view.rhythm_advance_key` (default auto: `<Space>`, or `<Tab>` when
-  `mapleader` is `<Space>`)
+:ReviewPR              Staged and unstaged changes against HEAD.
+:ReviewPR {base}       Committed changes from base...HEAD.
+:ReviewAddDiff         Add only on changed lines against the configured base.
 
-==============================================================================
-COMMANDS                                                      *locoreview-commands*
+PR view keys:
+  c         Add a comment on the current diff line.
+  K         Read comments on that line.
+  ]f / [f   Next / previous file.
+  ]c / [c   Next / previous hunk.
+  go        Open current-revision source in a new tab.
+  R         Refresh.
+  ?         Help.
+  q         Close.
 
-Core:
-- `:ReviewOpen`
-- `:ReviewAdd`
-- `:ReviewAddRange`
-- `:ReviewList`
-- `:ReviewNext`
-- `:ReviewPrev`
-- `:ReviewMarkFixed`
-- `:ReviewClean`
-- `:ReviewReopen`
-- `:ReviewPR [base_ref]`
-- `:ReviewOpenDiff`
-- `:ReviewFix`
+Untracked files are not part of the diff. Removed-line comments are anchored
+to the old path and revision. Line numbers do not track subsequent source edits.
 
-v1.5:
-- `:ReviewEdit`
-- `:ReviewDelete`
-- `:ReviewMarkBlocked`
-- `:ReviewMarkWontfix`
-- `:ReviewListAll [status=open] [severity=high] [file=path]`
-- `:ReviewRefresh`
-- `:ReviewPicker`
-- `:ReviewToggleSigns`
-- `:ReviewAddDiff`
+CONFIGURATION                                         *locoreview-config*
 
-==============================================================================
-KEYMAPS                                                        *locoreview-keymaps*
+  review_file       "review.md"
+  default_severity  "medium" (low, medium, high)
+  default_author    nil
+  base_branch       nil (auto-detect for diff-only adds)
+  diff_only         false
+  signs            { enabled = true, priority = 20 }
+  picker           { enabled = true, backend = "auto" }
+  keymaps           true (false disables; a table overrides individual maps)
 
-Default keymaps (when enabled):
-- `<leader>ro` `ReviewOpen`
-- `<leader>ra` `ReviewAdd`
-- `<leader>rA` `ReviewAddRange`
-- `<leader>rl` `ReviewList`
-- `<leader>rn` `ReviewNext`
-- `<leader>rp` `ReviewPrev`
-- `<leader>rf` `ReviewMarkFixed`
-- `<leader>rc` `ReviewClean`
-- `<leader>rr` `ReviewReopen`
-- `<leader>rx` `ReviewFix`
-- `<leader>re` `ReviewEdit`
-- `<leader>rD` `ReviewDelete`
-- `<leader>rb` `ReviewMarkBlocked`
-- `<leader>rw` `ReviewMarkWontfix`
-- `<leader>rR` `ReviewRefresh`
-- `<leader>rk` `ReviewPicker`
-- `<leader>rs` `ReviewToggleSigns`
-- `<leader>rv` `ReviewOpenDiff`
-- `<leader>rP` `ReviewPR`
+Picker backends: auto, telescope, fzf_lua, snacks, none (built-in selection).
+Default maps: <leader>ra add, rA visual range, rv show, rl list, rk picker,
+rn/rp next/previous, re edit, rf fixed, rr reopen, rD delete, ro review file,
+rP PR view, rR refresh, rs signs, rc clean, rb blocked, rw wontfix.
 
-==============================================================================
-REVIEW FILE FORMAT                                            *locoreview-file-format*
+MIGRATION                                             *locoreview-migration*
 
-Canonical format:
->
-  # Review Comments
+ReviewShow replaces ReviewOpenDiff (keymap option: show instead of open_diff).
+ReviewFix and agent options are removed. PR timers, moods, rhythm modes,
+rewards, viewed state and source-file management are removed, along with
+pr_view options. Requested-change text is never applied as source code.
+Existing Markdown review comments and status values remain supported.
 
-  ## RV-0001
-  file: lua/locoreview/store.lua
-  line: 42
-  end_line:
-  severity: medium
-  status: open
-  author:
-  created_at: 2026-03-28T15:30:00Z
-  updated_at: 2026-03-28T15:30:00Z
-
-  issue:
-  Explain the concern.
-
-  requested_change:
-  Explain the proposed fix.
-
-  ---
-<
-
-Rules:
-- Header required: `# Review Comments`
-- IDs are `RV-XXXX`
-- Item separator is `---`
-- `issue:` and `requested_change:` are multiline blocks
-- `end_line` and `author` may be blank
-
-==============================================================================
-INTEGRATIONS                                                *locoreview-integrations*
-
-Picker backends:
-- auto: Telescope -> fzf-lua -> snacks -> `vim.ui.select`
-
-Agent:
-- `:ReviewFix` runs `agent.cmd` with a generated prompt
-
-==============================================================================
-TROUBLESHOOTING                                            *locoreview-troubleshooting*
-
-- If commands are missing, verify plugin loaded and run setup.
-- If add commands fail, verify current buffer is a file in the repo.
-- If quickfix is empty, check item statuses and parser errors.
-- If picker command fails, set `picker.backend = "none"` or install a backend.
-
-==============================================================================
 vim:tw=78:ts=8:ft=help:norl:

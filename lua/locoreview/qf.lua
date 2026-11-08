@@ -42,15 +42,27 @@ function M.populate(items, filter)
   end)
 
   local entries = {}
+  local review_path = fs.review_file_path()
+  local review_lines = {}
+  if review_path then
+    local content = fs.read(review_path) or ""
+    local row = 0
+    for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+      row = row + 1
+      local id = line:match("^##%s+(RV%-%d+)%s*$")
+      if id then review_lines[id] = row end
+    end
+  end
   for _, item in ipairs(matched) do
     local filename = item.file
     if filename:sub(1, 1) ~= "/" then
       filename = root .. "/" .. filename
     end
+    local old = item.line_ref == "old"
     table.insert(entries, {
-      filename = filename,
-      lnum = item.line,
-      end_lnum = item.end_line,
+      filename = old and review_path or filename,
+      lnum = old and (review_lines[item.id] or 1) or item.line,
+      end_lnum = not old and item.end_line or nil,
       text = string.format("[%s][%s][%s] %s", item.id, item.severity, item.status, util.truncate(item.issue, 80)),
     })
   end

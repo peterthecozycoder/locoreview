@@ -38,6 +38,10 @@ describe("review picker", function()
       },
     }
 
+    setmetatable(_G.vim, { __index = old_vim })
+    setmetatable(_G.vim.api, { __index = old_vim.api })
+    setmetatable(_G.vim.fn, { __index = old_vim.fn })
+
     package.loaded["locoreview.config"] = {
       get = function()
         return {

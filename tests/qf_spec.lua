@@ -1,12 +1,13 @@
 package.path = "./lua/?.lua;./lua/?/init.lua;" .. package.path
 
 describe("review quickfix", function()
+  local real_vim = _G.vim
   local captured = nil
   local notifications = {}
   local repo_root = "/repo"
   local qf
 
-  setup(function()
+  before_each(function()
     _G.vim = {
       fn = {
         setqflist = function(_, _, payload)
@@ -16,6 +17,10 @@ describe("review quickfix", function()
       api = {},
       log = { levels = { ERROR = 1 } },
     }
+    setmetatable(_G.vim, { __index = real_vim })
+    setmetatable(_G.vim.api, { __index = real_vim.api })
+    setmetatable(_G.vim.fn, { __index = real_vim.fn })
+
     package.loaded["locoreview.ui"] = {
       notify = function(msg)
         table.insert(notifications, msg)
@@ -26,6 +31,7 @@ describe("review quickfix", function()
         return repo_root
       end,
     }
+    package.loaded["locoreview.qf"] = nil
     qf = require("locoreview.qf")
   end)
 
@@ -33,6 +39,10 @@ describe("review quickfix", function()
     captured = nil
     notifications = {}
     repo_root = "/repo"
+  end)
+
+  after_each(function()
+    _G.vim = real_vim
   end)
 
   it("populates open items by default with formatted text", function()

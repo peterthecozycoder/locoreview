@@ -10,7 +10,6 @@ local defaults = {
   mark_fixed = "<leader>rf",
   clean = "<leader>rc",
   reopen = "<leader>rr",
-  fix = "<leader>rx",
   edit = "<leader>re",
   delete = "<leader>rD",
   mark_blocked = "<leader>rb",
@@ -18,7 +17,7 @@ local defaults = {
   refresh = "<leader>rR",
   picker = "<leader>rk",
   toggle_signs = "<leader>rs",
-  open_diff = "<leader>rv",
+  show = "<leader>rv",
   pr        = "<leader>rP",
 }
 
@@ -32,7 +31,6 @@ local command_for = {
   mark_fixed = "ReviewMarkFixed",
   clean = "ReviewClean",
   reopen = "ReviewReopen",
-  fix = "ReviewFix",
   edit = "ReviewEdit",
   delete = "ReviewDelete",
   mark_blocked = "ReviewMarkBlocked",
@@ -40,7 +38,7 @@ local command_for = {
   refresh = "ReviewRefresh",
   picker = "ReviewPicker",
   toggle_signs = "ReviewToggleSigns",
-  open_diff = "ReviewOpenDiff",
+  show = "ReviewShow",
   pr        = "ReviewPR",
 }
 
@@ -57,7 +55,7 @@ function M.setup(cfg)
   for key, lhs in pairs(merged) do
     local cmd = command_for[key]
     if cmd and type(lhs) == "string" and lhs ~= "" then
-      vim.keymap.set("n", lhs, "<cmd>" .. cmd .. "<CR>", {
+      vim.keymap.set(key == "add_range" and "x" or "n", lhs, (key == "add_range" and ":" or "<cmd>") .. cmd .. "<CR>", {
         noremap = true,
         silent = true,
       })

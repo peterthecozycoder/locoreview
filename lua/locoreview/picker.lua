@@ -51,6 +51,10 @@ local function make_preview_lines(item)
 end
 
 local function jump_to(item)
+  if item.line_ref == "old" then
+    ui.show_comments({ item })
+    return true
+  end
   local root = git.repo_root()
   if not root or root == "" then
     ui.notify("could not determine repository root", vim.log.levels.ERROR)

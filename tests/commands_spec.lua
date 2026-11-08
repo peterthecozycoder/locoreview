@@ -1,6 +1,7 @@
 package.path = "./lua/?.lua;./lua/?/init.lua;" .. package.path
 
 describe("review commands", function()
+  local real_vim = _G.vim
   local created = {}
   local state = {}
 
@@ -23,7 +24,7 @@ describe("review commands", function()
     state.ensure_file_ok = true
   end
 
-  setup(function()
+  before_each(function()
     _G.vim = {
       api = {
         nvim_create_user_command = function(name, cb, _)
@@ -83,6 +84,10 @@ describe("review commands", function()
       },
     }
 
+    setmetatable(_G.vim, { __index = real_vim })
+    setmetatable(_G.vim.api, { __index = real_vim.api })
+    setmetatable(_G.vim.fn, { __index = real_vim.fn })
+
     package.loaded["locoreview.config"] = {
       get = function()
         return {
@@ -90,7 +95,6 @@ describe("review commands", function()
           default_author = nil,
           diff_only = state.diff_only,
           picker = { enabled = true, backend = "auto" },
-          agent = { enabled = false, cmd = "agent", open_in_split = true },
         }
       end,
     }
@@ -169,14 +173,10 @@ describe("review commands", function()
       end,
     }
     package.loaded["locoreview.ui"] = {
-      prompt_issue = function(cb)
-        cb(state.issue)
-      end,
-      prompt_requested_change = function(cb)
-        cb(state.requested_change)
-      end,
-      prompt_severity = function(_, cb)
-        cb(state.severity)
+      edit_comment = function(_, cb)
+        if state.issue ~= nil then
+          cb({ issue = state.issue, requested_change = state.requested_change or "", severity = state.severity })
+        end
       end,
       prompt_confirm = function(_, cb)
         cb(true)
@@ -194,11 +194,7 @@ describe("review commands", function()
       open = function()
       end,
     }
-    package.loaded["locoreview.agent"] = {
-      run = function()
-        return true
-      end,
-    }
+    package.loaded["locoreview.pr_view"] = { is_open = function() return false end }
     package.loaded["locoreview.signs"] = {
       refresh = function()
       end,
@@ -207,11 +203,16 @@ describe("review commands", function()
       end,
     }
 
+    package.loaded["locoreview.commands"] = nil
     require("locoreview.commands").register()
   end)
 
   before_each(function()
     reset_state()
+  end)
+
+  after_each(function()
+    _G.vim = real_vim
   end)
 
   it("adds an item from current line", function()
@@ -227,6 +228,24 @@ describe("review commands", function()
     assert.are.equal(1, #state.insert_calls)
     assert.are.equal(2, state.insert_calls[1].line)
     assert.are.equal(4, state.insert_calls[1].end_line)
+  end)
+
+  it("accepts a comment without a requested change", function()
+    state.requested_change = nil
+    created.ReviewAdd({})
+    assert.are.equal("", state.saved[1].requested_change)
+  end)
+
+  it("does not save a cancelled comment", function()
+    state.issue = nil
+    created.ReviewAdd({})
+    assert.is_nil(state.saved)
+  end)
+
+  it("uses the command range instead of stale visual marks", function()
+    created.ReviewAddRange({ line1 = 10, line2 = 12 })
+    assert.are.equal(10, state.saved[1].line)
+    assert.are.equal(12, state.saved[1].end_line)
   end)
 
   it("enforces diff_only for visual range", function()

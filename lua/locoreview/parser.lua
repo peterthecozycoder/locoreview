@@ -2,8 +2,8 @@ local M = {}
 
 local fs = require("locoreview.fs")
 local types = require("locoreview.types")
-local ITEM_HEADER_PATTERN = "^##%s+RV%-%d%d%d%d%s*$"
-local ITEM_ID_PATTERN = "^##%s+(RV%-%d%d%d%d)%s*$"
+local ITEM_HEADER_PATTERN = "^##%s+RV%-%d+%s*$"
+local ITEM_ID_PATTERN = "^##%s+(RV%-%d+)%s*$"
 local SEPARATOR_PATTERN = "^%-%-%-%s*$"
 
 local function split_lines(text)
@@ -24,6 +24,16 @@ local function trim_blank_edges(value)
     table.remove(lines, #lines)
   end
   return table.concat(lines, "\n")
+end
+
+local function unescape_line(line)
+  if line:sub(1, 1) ~= "\\" then return line end
+  local rest = line:sub(2)
+  if rest:match("^\\") or rest:match("^%-%-%-%s*$")
+    or rest:match("^##%s+RV%-%d+%s*$") or rest:match("^requested_change:%s*$") then
+    return rest
+  end
+  return line
 end
 
 local function parse_scalar_line(line)
@@ -70,7 +80,7 @@ local function parse_item(lines, start_i)
     if lines[i]:match(ITEM_HEADER_PATTERN) or lines[i]:match(SEPARATOR_PATTERN) then
       break
     end
-    table.insert(issue_lines, lines[i])
+    table.insert(issue_lines, unescape_line(lines[i]))
     i = i + 1
   end
 
@@ -88,7 +98,7 @@ local function parse_item(lines, start_i)
       if lines[i]:match(ITEM_HEADER_PATTERN) then
         break
       end
-      table.insert(requested_change_lines, lines[i])
+      table.insert(requested_change_lines, unescape_line(lines[i]))
       i = i + 1
     end
     item.requested_change = trim_blank_edges(table.concat(requested_change_lines, "\n"))
@@ -108,7 +118,7 @@ local function parse_item(lines, start_i)
   if item.end_line == "" then
     item.end_line = nil
   elseif item.end_line ~= nil then
-    item.end_line = tonumber(item.end_line)
+    item.end_line = tonumber(item.end_line) or item.end_line
   end
 
   if item.author == "" then

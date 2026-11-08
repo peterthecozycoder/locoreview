@@ -22,8 +22,6 @@
 
 local M = {}
 
-local config = require("locoreview.config")
-local git    = require("locoreview.git")
 
 local function run(cmd)
   local out = vim.fn.systemlist(cmd)

@@ -37,7 +37,7 @@ local function ensure_parent_dir(path)
     return true
   end
 
-  local ok = os.execute(string.format('mkdir -p "%s"', dir))
+  local ok = os.execute("mkdir -p '" .. dir:gsub("'", "'\"'\"'") .. "'")
   return ok == true or ok == 0
 end
 
@@ -103,25 +103,16 @@ function M.write(path, content)
     return false
   end
 
-  local tmp = string.format("%s.tmp.%d", path, os.time())
+  local suffix = has_vim() and vim.fn and vim.fn.tempname and vim.fn.tempname():match("[^/]+$")
+    or tostring(os.time())
+  local tmp = path .. ".tmp." .. suffix
   local file = io.open(tmp, "w")
-  if file then
-    file:write(content or "")
-    file:close()
-    local ok = os.rename(tmp, path)
-    if ok then
-      return true
-    end
-    os.remove(tmp)
-  end
-
-  local fallback = io.open(path, "w")
-  if not fallback then
-    return false
-  end
-  fallback:write(content or "")
-  fallback:close()
-  return true
+  if not file then return false end
+  local written = file:write(content or "")
+  local closed = file:close()
+  if written and closed and os.rename(tmp, path) then return true end
+  os.remove(tmp)
+  return false
 end
 
 function M.ensure_file(path, initial_content)
