@@ -1,0 +1,105 @@
+local M = {}
+
+local util = require("locoreview.util")
+
+M.STATUS = {
+  open = "open",
+  fixed = "fixed",
+  blocked = "blocked",
+  wontfix = "wontfix",
+}
+
+M.SEVERITY = {
+  low = "low",
+  medium = "medium",
+  high = "high",
+}
+
+M.VALID_TRANSITIONS = {
+  open = {
+    fixed = true,
+    blocked = true,
+    wontfix = true,
+  },
+  fixed = {
+    open = true,
+  },
+  blocked = {
+    open = true,
+  },
+  wontfix = {
+    open = true,
+  },
+}
+
+local function is_status(value)
+  return type(value) == "string" and M.STATUS[value] ~= nil
+end
+
+local function is_severity(value)
+  return type(value) == "string" and M.SEVERITY[value] ~= nil
+end
+
+function M.new_item(fields)
+  if type(fields) ~= "table" then
+    return nil, "fields must be a table"
+  end
+
+  if type(fields.file) ~= "string" or fields.file == "" then
+    return nil, "missing required field: file"
+  end
+
+  local line = tonumber(fields.line)
+  if not line or line < 1 or line % 1 ~= 0 then
+    return nil, "missing required field: line"
+  end
+
+  if not is_severity(fields.severity) then
+    return nil, "missing or invalid required field: severity"
+  end
+
+  if not is_status(fields.status) then
+    return nil, "missing or invalid required field: status"
+  end
+
+  if type(fields.issue) ~= "string" or util.trim(fields.issue) == "" then
+    return nil, "missing required field: issue"
+  end
+
+  local end_line = tonumber(fields.end_line)
+  if fields.end_line ~= nil and (not end_line or end_line < line or end_line % 1 ~= 0) then
+    return nil, "end_line must be an integer at or after line"
+  end
+  if fields.requested_change ~= nil and type(fields.requested_change) ~= "string" then
+    return nil, "requested_change must be a string"
+  end
+
+  local created_at = fields.created_at or util.now_utc()
+  local updated_at = fields.updated_at or created_at
+
+  local line_ref = fields.line_ref
+  if line_ref ~= "old" then
+    line_ref = "new"
+  end
+
+  return {
+    id = fields.id,
+    file = fields.file,
+    line = line,
+    line_ref = line_ref,
+    end_line = tonumber(fields.end_line),
+    severity = fields.severity,
+    status = fields.status,
+    issue = fields.issue,
+    requested_change = fields.requested_change or "",
+    author = fields.author,
+    created_at = created_at,
+    updated_at = updated_at,
+  }
+end
+
+function M.is_valid_transition(from, to)
+  return M.VALID_TRANSITIONS[from] ~= nil and M.VALID_TRANSITIONS[from][to] == true
+end
+
+return M
